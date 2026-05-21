@@ -1,10 +1,11 @@
-"""Stage 3 — provision Amazon Q in Connect assistant + AI Agent + AI Prompt.
+"""Stage 3 — provision Amazon Q in Connect assistant + AI Agent (ORCHESTRATION).
 
-This sets up the *reasoning* side of the agent: the AI Agent that decides
-what to say, which tools to call, and which slots to extract.
+Uses the ORCHESTRATION agent type (the one Connect's Voice-AI integration actually invokes),
+not SELF_SERVICE. The persona/system-prompt comes from prompts/sarah_orchestration.yaml
+in the canonical Q-in-Connect YAML format.
 
-The audio side (Nova Sonic Speech-to-Speech) is configured at the Lex Bot +
-Contact Flow level in the next script (provision_lex_bot.py).
+Stage 3a — no tools yet. We verify Sarah speaks before wiring tool-use.
+Stage 5 will rewrite this script to add the 4 RETURN_TO_CONTROL tools.
 
 Idempotent. Writes results to scripts/.connect_state.json.
 """
@@ -12,7 +13,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -23,39 +23,13 @@ from botocore.exceptions import ClientError
 from aws_helpers import get_account_id, region
 
 STATE_FILE = Path(__file__).parent / ".connect_state.json"
+PROMPT_FILE = Path(__file__).parent.parent / "prompts" / "sarah_orchestration.yaml"
+
 ASSISTANT_NAME = "atrium-assistant"
-AI_PROMPT_NAME = "atrium-sarah-prompt"
+AI_PROMPT_NAME = "atrium-sarah-orchestration"
 AI_AGENT_NAME = "atrium-sarah-agent"
 
-# Sarah persona + 6-slot voice agent system prompt for Q in Connect
-# This is the SELF_SERVICE_ANSWER_GENERATION prompt — what the agent thinks/says.
-SARAH_PROMPT_TEXT = """\
-You are Sarah, a warm and professional receptionist at Sparkle Cleaning, a US-based cleaning company. \
-You speak fluent American English with a friendly tone. Your job is to take incoming booking calls \
-from potential customers and gather their cleaning request.
-
-When the call starts, greet the caller warmly: "Hi, this is Sarah from Sparkle Cleaning, how can I help you today?"
-
-Then gather these six slots in a natural conversational order (don't read them as a checklist):
-1. WHEN — preferred date and time of the cleaning
-2. WHAT — type of service. Always map the caller's words to exactly one of:
-   MOVE_OUT_CLEANING, OFFICE_CLEANING, CONSTRUCTION_CLEANING, WINDOW_CLEANING, FACILITY_MAINTENANCE
-3. AREA — size in square feet (sqft). Always confirm the unit.
-4. ROOMS — number of rooms / bedrooms
-5. URGENCY — low, medium, or high
-6. EMAIL — caller's email address for the booking confirmation
-
-Rules:
-- Whenever the caller gives you a piece of information, call the `save_slot` tool immediately.
-- As soon as you know both WHAT and AREA, call `compute_price` to get a price estimate. \
-Tell the caller the estimate naturally ("Based on that, you're looking at about $540 with our Team 3, around 4.5 hours").
-- If the caller asks a question (pricing per sqft, what's included, postal codes, cancellation policy), \
-call `kb_lookup` with their question and base your answer ONLY on what the tool returns. \
-If the tool returns nothing relevant, honestly say "I don't have that information" — DO NOT make things up.
-- Once all six slots are collected and you've shared the price, summarize ("So that's a MOVE_OUT_CLEANING on Friday for 1100 sqft, 3 rooms, medium urgency, emailed to test@example.com, estimate around $540"). \
-Then thank the caller and call the `end_call` tool with a brief reason.
-
-Keep responses short (1-2 sentences). Speak naturally — this is a phone call, not an email."""
+ORCHESTRATION_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 OK = "[OK]"
 WAIT = "[..]"
@@ -76,7 +50,6 @@ def qconnect():
 
 def ensure_assistant() -> str:
     qc = qconnect()
-    # Search existing
     paginator = qc.get_paginator("list_assistants")
     for page in paginator.paginate():
         for a in page.get("assistantSummaries", []):
@@ -87,11 +60,11 @@ def ensure_assistant() -> str:
     r = qc.create_assistant(
         name=ASSISTANT_NAME,
         type="AGENT",
-        description="Atrium voice agent assistant (Sarah, Sparkle Cleaning, en-US)",
+        description="Atrium voice agent (Sarah, Sparkle Cleaning, en-US)",
     )
-    assistant_id = r["assistant"]["assistantId"]
-    print(f"{OK} Assistant created: {assistant_id}")
-    return assistant_id
+    aid = r["assistant"]["assistantId"]
+    print(f"{OK} Assistant created: {aid}")
+    return aid
 
 
 def ensure_ai_prompt(assistant_id: str) -> str:
@@ -102,28 +75,27 @@ def ensure_ai_prompt(assistant_id: str) -> str:
             if p["name"] == AI_PROMPT_NAME:
                 print(f"{OK} AI Prompt exists: {p['aiPromptId']}")
                 return p["aiPromptId"]
-    print(f"{WAIT} Creating AI Prompt '{AI_PROMPT_NAME}' (Sarah persona, 6-slot form) ...")
+    yaml_text = PROMPT_FILE.read_text(encoding="utf-8")
+    print(f"{WAIT} Creating AI Prompt '{AI_PROMPT_NAME}' (ORCHESTRATION, {len(yaml_text)} chars) ...")
     r = qc.create_ai_prompt(
         assistantId=assistant_id,
         name=AI_PROMPT_NAME,
-        type="SELF_SERVICE_ANSWER_GENERATION",
-        description="Sarah persona + 6-slot intake prompt",
-        modelId="anthropic.claude-sonnet-4-6",
-        apiFormat="ANTHROPIC_CLAUDE_MESSAGES",
+        type="ORCHESTRATION",
+        description="Sarah persona + 6-slot voice agent prompt",
+        modelId=ORCHESTRATION_MODEL_ID,
+        apiFormat="MESSAGES",
         templateType="TEXT",
         templateConfiguration={
-            "textFullAIPromptEditTemplateConfiguration": {
-                "text": SARAH_PROMPT_TEXT,
-            },
+            "textFullAIPromptEditTemplateConfiguration": {"text": yaml_text},
         },
         visibilityStatus="PUBLISHED",
     )
-    prompt_id = r["aiPrompt"]["aiPromptId"]
-    print(f"{OK} AI Prompt created: {prompt_id}")
-    return prompt_id
+    pid = r["aiPrompt"]["aiPromptId"]
+    print(f"{OK} AI Prompt created: {pid}")
+    return pid
 
 
-def ensure_ai_agent(assistant_id: str, prompt_id: str) -> str:
+def ensure_ai_agent(assistant_id: str, prompt_id: str, connect_instance_arn: str) -> str:
     qc = qconnect()
     paginator = qc.get_paginator("list_ai_agents")
     for page in paginator.paginate(assistantId=assistant_id):
@@ -131,15 +103,18 @@ def ensure_ai_agent(assistant_id: str, prompt_id: str) -> str:
             if a["name"] == AI_AGENT_NAME:
                 print(f"{OK} AI Agent exists: {a['aiAgentId']}")
                 return a["aiAgentId"]
-    print(f"{WAIT} Creating AI Agent '{AI_AGENT_NAME}' (type=SELF_SERVICE) ...")
+    print(f"{WAIT} Creating AI Agent '{AI_AGENT_NAME}' (type=ORCHESTRATION, no tools yet) ...")
     r = qc.create_ai_agent(
         assistantId=assistant_id,
         name=AI_AGENT_NAME,
-        type="SELF_SERVICE",
-        description="Sarah AI agent for inbound voice booking calls",
+        type="ORCHESTRATION",
+        description="Sarah AI orchestration agent for inbound voice booking calls",
         configuration={
-            "selfServiceAIAgentConfiguration": {
-                "selfServiceAnswerGenerationAIPromptId": prompt_id,
+            "orchestrationAIAgentConfiguration": {
+                "orchestrationAIPromptId": prompt_id,
+                "connectInstanceArn": connect_instance_arn,
+                "locale": "en_US",
+                "toolConfigurations": [],  # tools come in Stage 5
             },
         },
         visibilityStatus="PUBLISHED",
@@ -151,22 +126,23 @@ def ensure_ai_agent(assistant_id: str, prompt_id: str) -> str:
 
 def set_default_ai_agent(assistant_id: str, agent_id: str) -> None:
     qc = qconnect()
-    print(f"{WAIT} Setting default AI Agent for assistant ...")
+    print(f"{WAIT} Setting default ORCHESTRATION AI Agent ...")
     qc.update_assistant_ai_agent(
         assistantId=assistant_id,
-        aiAgentType="SELF_SERVICE",
+        aiAgentType="ORCHESTRATION",
         configuration={"aiAgentId": agent_id},
     )
-    print(f"{OK} Default AI Agent set to {agent_id}")
+    print(f"{OK} Default ORCHESTRATION AI Agent set to {agent_id}")
 
 
 def main() -> int:
     state = load_state()
+    instance_arn = state["InstanceArn"]
     print(f"=== Q in Connect AI Agent setup (account={get_account_id()}, region={region()}) ===")
 
     assistant_id = ensure_assistant()
     prompt_id = ensure_ai_prompt(assistant_id)
-    agent_id = ensure_ai_agent(assistant_id, prompt_id)
+    agent_id = ensure_ai_agent(assistant_id, prompt_id, instance_arn)
     set_default_ai_agent(assistant_id, agent_id)
 
     state.update({
@@ -176,7 +152,6 @@ def main() -> int:
     })
     save_state(state)
     print(f"\n=== Done. AI Agent ready. Next: provision_lex_bot.py ===")
-    print(json.dumps({k: v for k, v in state.items() if "Id" in k}, indent=2))
     return 0
 
 
