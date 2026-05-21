@@ -2,22 +2,29 @@
 **Project codename:** *atrium* | **Event:** AWS ColuseumHack | **Region:** `us-west-2` (Bedrock parity)
 **Demo priority:** *It has to land live.* **100% voice-demo focus** — everything else is mocked or moved to roadmap.
 
+> **Service allow-list compliance (2026-05-22):** Atrium uses ONLY services on the hackathon allow-list.
+> What got swapped out vs. the original vision (Connect / Nova Sonic / AppSync are *not* on the list):
+> - **Front door:** Browser-WebRTC + API Gateway WebSocket (not Amazon Connect / PSTN)
+> - **Voice loop:** Amazon Transcribe Streaming → Bedrock Claude Sonnet 4.6 → Amazon Polly Neural (not Bedrock Nova Sonic)
+> - **Live Wall realtime:** API Gateway WebSocket + DynamoDB Streams via Lambda fan-out (not AppSync)
+> - **PSTN as a roadmap item** — pitched verbally as "Connect drop-in once it's on the list".
+
 ---
 
 ## 0. Context & TL;DR
 
 **Problem:** Cleaning companies lose revenue from missed inbound calls — crews are scrubbing floors, not picking up the phone.
 
-**Solution (demo scope):** **Atrium** — a **24/7 multilingual AI phone agent** on AWS that:
-1. Picks up calls (real PSTN number via Amazon Connect)
+**Solution (demo scope):** **Atrium** — a **24/7 multilingual AI voice agent** on AWS that:
+1. Answers a call in a browser (juror clicks "Call now" on the Live Call Wall) — production-path is PSTN, swapped here only because Amazon Connect is not on the event allow-list
 2. Captures a structured 6-slot request (When, What, area, Rooms, Urgency, Email)
 3. Answers FAQs via RAG over company-specific Knowledge Base
 4. Surfaces crew + price live during the call (Brain visible on the wall while caller is still speaking)
 5. Visualizes everything in realtime on the **Live Call Wall**
 
-**Explicitly out of demo scope (roadmap):** calendar sync, email module, photo loop, invoice PDF. Mentioned verbally in the pitch as "next step" but **not built** — the voice flow must be flawless.
+**Explicitly out of demo scope (roadmap):** calendar sync, email module, photo loop, invoice PDF, PSTN/Amazon Connect drop-in. Mentioned verbally in the pitch as "next step" but **not built** — the voice flow must be flawless.
 
-**Demo flow:** Juror calls the number, watches the Wall light up live: transcript, extracted slots, Brain output (price + crew), and KB-grounded FAQ answers with citations. Optional second call in another language proves multilingual capability.
+**Demo flow:** Juror clicks "Call now" on the Wall, talks into the browser mic, watches the Wall light up live: transcript, extracted slots, Brain output (price + crew), and KB-grounded FAQ answers with citations. Optional second call in another language (different tenant) proves multilingual capability.
 
 ---
 
@@ -27,104 +34,117 @@
                                 EXTERNAL
                                     |
                           +---------v---------+
-                          |  Customer Phone   |
-                          |  (Juror calls a   |
-                          |   real number)    |
+                          |  Juror's browser  |
+                          |  ("Call now" btn  |
+                          |   on the Wall)    |
                           +---------+---------+
                                     |
-                                    |  PSTN
+                                    |  WebRTC mic capture
+                                    |  (PCM frames over WS)
                                     v
                   +---------------------------------+
-                  |   Amazon Connect (Contact Flow  |
-                  |   + Phone Number)               |
-                  +-----------------+---------------+
-                                    |
-                                    |  Audio stream (KVS)
-                                    v
-                  +---------------------------------+
-                  |  Amazon Lex Bot                 |
-                  |  (entry/exit shim)              |
+                  |  API Gateway WebSocket          |
+                  |  $connect / $message / $disco   |
                   +-----------------+---------------+
                                     |
                                     v
         +--------------------------------------------------+
         |   INPUT AGENT LAMBDA  (Python, long-running)     |
-        |   - bidi stream: Connect <-> Nova Sonic          |
-        |   - system prompt = persona + 6 questions + FAQ  |
-        |   - tools: kb_lookup, save_slot, compute_price,  |
-        |            end_call                              |
+        |   - Transcribe Streaming bidi (PCM in / partial   |
+        |     + final transcripts out)                      |
+        |   - On final transcript turn:                     |
+        |       Claude Sonnet 4.6 (tool-use via Converse)   |
+        |   - Polly Neural TTS for agent replies            |
+        |     (audio frames pushed back through WS)         |
+        |   - tools: kb_lookup, save_slot, compute_price,   |
+        |            end_call                               |
         +--+----------+---------+---------+----------+-----+
            |          |         |         |          |
            v          v         v         v          v
-   +-------------+ +-----+ +---------+ +-------+ +----------+
+   +-------------+ +-----+ +----------+ +-------+ +----------+
    | Bedrock     | | KB  | | DynamoDB | | Brain | | Event-   |
-   | Nova Sonic  | |+S3V | | Calls + | | Lambda| | Bridge   |
-   | speech<->   | | RAG | | Slots   | | (Claude| | (logging |
-   +-------------+ +-----+ +----+----+ | Sonnet | |  only)   |
-                                |       | 4.6)  | +----------+
+   | Transcribe  | |+S3V | | Calls +  | | Lambda| | Bridge   |
+   | + Claude +  | | RAG | | Bookings | |(Claude| | (logging |
+   | Polly       | |     | | Companies| | Sonnet| |  only)   |
+   +-------------+ +-----+ +----+-----+ | 4.6)  | +----------+
                                 |       +---+---+
-                                |           |
-                              Streams       v
-                                |       DDB write
-                                v       (brain output)
-                          +----------+      |
-                          | AppSync  |<-----+
-                          | GraphQL  |
-                          | Sub      |
-                          +----+-----+
-                               |
-                               v
-                       +---------------+
-                       | Live Call Wall|
-                       | Amplify+React |
-                       +---------------+
+                              Streams       |
+                                |           v
+                                v       DDB write
+                          +-----------+      |
+                          | Fan-out   |<-----+
+                          | Lambda    |
+                          | (DDB Strm |
+                          |  -> WS    |
+                          |  postToCon)
+                          +-----+-----+
+                                |
+                                |  WebSocket push (one connection per
+                                |   open Wall browser, looked up by
+                                |   companyId index in DDB Connections)
+                                v
+                        +---------------+
+                        | Live Call Wall|
+                        | Amplify+React |
+                        +---------------+
 ```
 
 **Reading the diagram:** everything happens *during* the call. Once the caller hangs up, the show is over — no pipeline, no email, no invoice. Brain Lambda is called by the Input Agent as a tool as soon as enough slots are known, so the Wall shows the price while the caller is still talking.
 
+**Two WebSocket APIs (intentional):** one carries caller-audio (the WebRTC mic / TTS playback channel); the other carries Wall-updates (transcript chunks, slots, brain output). Both terminate on API Gateway WebSocket, both back-ended by Lambda. No PSTN, no AppSync, no Connect-Lex hop — every box in the diagram is on the hackathon allow-list.
+
 ---
 
-## 2. Service-by-Service Breakdown (lean)
+## 2. Service-by-Service Breakdown (lean, allow-list-compliant)
 
 | Service | Role | Why |
 |---|---|---|
-| **Amazon Connect** | Owns phone number, contact flow, audio bridge | Only AWS service that gives you a real PSTN number in minutes |
-| **Amazon Lex V2** | Entry-point bot, session holder, calls our fulfilment Lambda | Required hop between Connect and a custom voice LLM |
-| **Bedrock Nova Sonic** | Speech-to-speech, multilingual, low latency | Saves the Transcribe → LLM → Polly tax (~1.5s → ~400ms) |
-| **Bedrock Claude Sonnet 4.6** (`us.anthropic.claude-sonnet-4-6-...`) | Brain — crew/price calculation as a tool-call inside the voice loop | Already proven via `smoke_test.py`; strongest reasoning |
-| **Bedrock Knowledge Base + S3 Vectors** | RAG over company PDFs (Pricelist, FAQ, Service Catalog) | Managed KB; S3 Vectors is brand-new and worth name-dropping |
-| **Bedrock AgentCore Memory** | Per-caller short-term memory across turns | Hot AWS feature, clean state handler |
+| **Browser WebRTC (frontend)** | Captures juror mic, plays Polly TTS back | Replaces PSTN front door; Connect is not on the allow-list |
+| **API Gateway WebSocket** (×2) | (a) Audio channel browser ↔ Input Agent; (b) Wall channel browser ↔ Fan-out Lambda | Bi-directional, native AWS, on allow-list |
+| **Amazon Transcribe Streaming** | Caller speech → text (partials + finals) | On the allow-list; cancellable on barge-in |
+| **Bedrock Claude Sonnet 4.6** (`us.anthropic.claude-sonnet-4-6`) | Voice agent's brain (turn-by-turn responses + tool-use); also powers the Brain Lambda | Already proven via `smoke_test.py`; only Anthropic model on the allow-list aside from Opus 4.6 |
+| **Amazon Polly Neural** | Agent text → MP3 frames, multilingual voices | On the allow-list; `Joanna` (en-US), `Vicki` (de-DE), `Lupe` (es-US) — one voice per tenant |
+| **Bedrock Knowledge Base + S3 Vectors** | RAG over company PDFs (Pricelist, FAQ, Service Catalog) | KB is part of Bedrock; S3 Vectors is explicitly on the allow-list |
+| **Bedrock AgentCore Memory** | Per-caller short-term memory across turns | AgentCore is explicitly on the allow-list |
 | **Bedrock AgentCore Observability** | Trace every tool call live for the Wall + slides | Visual jury candy + latency proof |
-| **DynamoDB** | `Calls` (transcript), `Bookings` (slots+brain), `Companies` (tenant config) | Single-digit-ms, Streams trigger Wall updates |
-| **DynamoDB Streams** | Push to AppSync for live UI | Zero polling, true realtime |
-| **AWS AppSync** | Pushes call state to the Live Call Wall | Native subscriptions, less glue code than API GW WebSocket |
-| **Lambda** | Input Agent (long-running bidi bridge), Brain (tool-call) | Pay-per-call |
+| **DynamoDB** | `Calls` (transcript), `Bookings` (slots+brain), `Companies` (tenant config), `Connections` (active Wall WS sessions) | Single-digit-ms, Streams trigger Wall updates |
+| **DynamoDB Streams + Fan-out Lambda** | Stream → small Lambda that pushes to all WS connections subscribed to that `companyId` | Replaces AppSync (not on allow-list); ~30 lines of code |
+| **Lambda** | Input Agent (audio ↔ Transcribe ↔ Claude ↔ Polly), Brain (tool-call sub-agent), Fan-out (DDB → WS) | Pay-per-call; long-running Input Agent invoked via WS |
 | **EventBridge** | Logging bus only for `CallStarted`/`CallEnded` — no pipeline | Hooks for post-hackathon (email/invoice roadmap) |
-| **S3** | `kb/` (company PDFs), `recordings/` (call audio), `web/` (Wall build) | Default |
-| **S3 Vectors** | Vector store behind the KB | Name-drop in the pitch |
-| **CloudFront + Amplify Hosting** | Live Call Wall frontend | Amplify gives instant HTTPS subdomain |
+| **S3** | `kb/` (company PDFs), `recordings/` (full-call audio, optional), `web/` (Wall build) | Default |
+| **S3 Vectors** | Vector store behind the KB | On the allow-list |
+| **CloudFront + Amplify Hosting** | Live Call Wall frontend (incl. the WebRTC "Call now" button) | Amplify gives instant HTTPS subdomain |
 | **CloudWatch + AgentCore Observability** | Logs + traces for latency proof | Slide material |
+| **Amazon Lex V2** | Optional intent shim if we need a deterministic "end the call" intent | Lex V2 is on the allow-list; only used if WS-only flow can't reliably handle hang-up signalling |
 
-**Removed from the stack** (vs original full vision): SES, Step Functions, SQS, Pixtral/Vision, Textract, Rekognition, Google Calendar API, Secrets Manager, `reportlab`. These return after the hackathon.
+**Explicitly NOT in this stack** (not on the hackathon allow-list — flagged so nobody reaches for them mid-hack): Amazon Connect, Q in Connect, Bedrock Nova Sonic, AppSync, Amazon SES, Kinesis Video Streams.
+
+**Also out of scope but allow-listed (would be fine to add later):** SES isn't on the list; Step Functions, SQS, Pixtral/Vision, Textract, Rekognition are — but stay out to keep the demo scope small. Google Calendar API and `reportlab` are non-AWS and out of demo scope regardless.
 
 ---
 
 ## 3. Module Breakdown (only 2 modules — Voice + Brain)
 
 ### 3.1 Input Agent (Voice) — **THE main module**
-- **Backed by:** Connect → Lex → Lambda ↔ Nova Sonic + KB.Retrieve + Brain tool
-- **Input:** Live audio stream (KVS from Connect)
-- **Output:** Partial transcript chunks → DDB `Calls#<callId>#turn#<seq>`; slots → DDB `Bookings`; Brain output → DDB `Bookings.brain`
-- **Multilingual by design:** persona, greeting, English/German/French/Spanish driven by `Companies.locale` + `Companies.voicePersonaPrompt`. Nova Sonic detects caller language in the first turn and switches.
+- **Backed by:** Browser WebRTC → API GW WebSocket → Lambda ↔ (Transcribe Streaming, Claude Sonnet 4.6 Converse + tool-use, Polly Neural) + KB.Retrieve + Brain tool
+- **Input:** PCM16 audio frames (~20 ms each) over WebSocket, captured by the browser via `getUserMedia` + `AudioWorklet`
+- **Output (back over the same WS):** Polly MP3 frames + control messages (`agent_speaking_start/end`, `final_transcript`). Side effects: partial transcript chunks → DDB `Calls#<callId>#turn#<seq>`; slots → DDB `Bookings`; Brain output → DDB `Bookings.brain`
+- **Multilingual by design:** persona, greeting, English/German/French/Spanish driven by `Companies.locale` + `Companies.voicePersonaPrompt`. Transcribe Streaming is invoked with `LanguageCode=<tenant>`; Polly voice + Claude system-prompt language are picked from the same `Companies` row.
+- **Turn loop (Lambda pseudo-code):**
+  1. WS `$connect` resolves `companyId` from query string, writes a `Connections` row, opens a Transcribe Streaming bidi stream, sends the greeting via Polly
+  2. On each WS `audio` message → forward PCM to Transcribe
+  3. On Transcribe `final` event → call Claude Sonnet 4.6 `Converse` with tool-use (system prompt = persona + 6-slot schema + KB-grounding instruction)
+  4. Claude → either text reply (Polly → WS) or tool call (`kb_lookup`/`save_slot`/`compute_price`/`end_call`)
+  5. On `end_call` tool or WS `$disconnect` → close Transcribe, emit EventBridge `CallEnded`
 - **System prompt contains:**
   1. Persona template from DDB per tenant (example DE: "You are Lara, receptionist at Glanz AG"; example US: "You are Sarah, the receptionist at Sparkle Cleaning")
   2. 6-slot form (When, What, Area, Rooms, Urgency, Email) with JSON-schema hints and unit conversion based on tenant locale
   3. Instruction: "As soon as you have `what` + `area`, call `compute_price` so the caller hears a ballpark before hanging up"
 - **Tools:**
   - `kb_lookup(question)` → Bedrock KB.Retrieve, returns top-4 chunks
-  - `save_slot(slot, value)` → DDB write, triggers Wall update via Streams
+  - `save_slot(slot, value)` → DDB write, triggers Wall update via Streams → Fan-out Lambda → WS
   - `compute_price(slots)` → invokes Brain Lambda sync, returns `{serviceType, crew, hours, price, currency}`, writes to `Bookings.brain`, triggers Wall update
-  - `end_call(reason)` → closes session, emits EventBridge log
+  - `end_call(reason)` → closes WS session, emits EventBridge log
 
 ### 3.2 Brain (tool-call from Input Agent, no separate endpoint)
 - **Backed by:** Lambda + Claude Sonnet 4.6 with tool-use
@@ -147,8 +167,9 @@
 - **Service-type taxonomy is fixed** (list provided by user, mapped to English keys) — Brain must pick exactly one.
 
 ### Intentionally NOT in demo scope (mention as "next step" in the pitch)
+- **PSTN / Amazon Connect drop-in** (once Connect lands on the allow-list — the architecture is designed so the WebRTC channel can be swapped for a Connect contact-flow + KVS bridge without changing the Input Agent's Transcribe/Claude/Polly core)
 - Calendar sync (.ics + Google Calendar API)
-- Email module (photo request via SES)
+- Email module (photo request via SES — also not on the allow-list)
 - Vision-based re-pricing (Pixtral on customer photos)
 - Invoice generation (PDF via reportlab)
 - Step Functions post-call pipeline
@@ -170,9 +191,14 @@
 
 **`Companies`** — tenant config
 - PK: `companyId` | SK: `profile`
-- Attrs: `name`, `phoneNumber` (→ Connect mapping), `priceMatrix{}`, `voicePersonaPrompt`, `kbId`, `locale` (de-CH, en-US, es-MX, ...), `currency`, `unitSystem` (metric/imperial), `timezone`
+- Attrs: `name`, `tenantSlug` (used as `?company=` on the Wall URL — no PSTN mapping in this demo), `priceMatrix{}`, `voicePersonaPrompt`, `pollyVoiceId` (e.g. `Joanna`, `Vicki`, `Lupe`), `kbId`, `locale` (de-CH, en-US, es-MX, ...), `currency`, `unitSystem` (metric/imperial), `timezone`
 
 **`Crews`** — small static seed table for Brain tool-use (3-5 demo crews are enough)
+
+**`Connections`** — active WebSocket connections (replaces what AppSync would have managed for us)
+- PK: `connectionId` (WS connection id from API GW) | SK: `meta`
+- Attrs: `companyId`, `kind` (`audio` | `wall`), `callId` (set on audio connections), `connectedAt`, `ttl` (auto-clean idle rows)
+- GSI1: `companyId#kind` → list of subscribers per tenant, used by Fan-out Lambda
 
 ### S3 Buckets (only 3)
 - `s3://atrium-kb-<acct>/companies/<companyId>/...pdf` — RAG source
@@ -195,21 +221,35 @@
 ## 5. Call Flow (no Step Functions needed)
 
 ```
-   Connect ---audio--> Lex ---bidi--> Input Agent Lambda <--> Nova Sonic
-                                          |  ^   ^
-                                          |  |   |
-                          (per turn)      |  |   |  (KB.Retrieve)
-                                          v  |   |
+   Browser mic --PCM frames over WS--> API GW WS --> Input Agent Lambda
+                                                          |
+                                          (Transcribe Streaming bidi)
+                                                          |
+                                          (final transcript per turn)
+                                                          v
                                        DDB Calls.put     KB query for FAQ
                                           |              |
                                           v              v
-                                    DDB Streams      Bedrock KB
+                                    DDB Streams      Bedrock KB Retrieve
                                           |
                                           v
-                              AppSync GraphQL Subscription
+                                  Fan-out Lambda (DDB stream consumer)
                                           |
+                                          | apigw.post_to_connection(...)
                                           v
                                   Live Call Wall (browser)
+
+
+   Per turn, after the final transcript:
+   Input Agent Lambda --(Converse + tool-use)--> Claude Sonnet 4.6
+                                          |
+                                          | text reply
+                                          v
+                                Polly Neural (synthesize_speech)
+                                          |
+                                          | MP3 frames
+                                          v
+                              API GW WS --> Browser (audio playback)
 
 
    Tool: compute_price (called mid-call when enough slots are known):
@@ -222,13 +262,14 @@
                                     DDB Bookings.brain.put
                                           |
                                           v
-                                    DDB Streams -> AppSync -> Wall
+                          DDB Streams -> Fan-out Lambda -> WS -> Wall
                                     (Brain pane fills in)
 
 
-   On end_call tool:
+   On end_call tool OR WS $disconnect:
    Input Agent Lambda -> EventBridge "CallEnded" (log only)
-   Session closes. The demo-relevant loop ends here.
+   Transcribe stream closed, Polly idle, Connections row deleted.
+   The demo-relevant loop ends here.
 ```
 
 **Everything happens during the call.** No async pipeline, no Step Functions, no SQS — the demo loop is mouth-open until hang-up, all visible on the Wall in realtime.
@@ -239,9 +280,11 @@
 
 **Stack:** Vite + React + Tailwind + shadcn → built artifact → served via **Amplify Hosting** (instant HTTPS).
 
-**Realtime mechanism:** **AWS AppSync** GraphQL subscriptions, Lambda resolver reads from DDB. DDB Streams trigger AppSync mutation → all subscribers update.
-- *Why AppSync:* less plumbing than API GW WebSocket; native subscriptions; better demo story.
-- *Fallback:* dumb 1Hz polling on an API GW endpoint if AppSync wiring eats too much time.
+**Realtime mechanism:** **API Gateway WebSocket** (the Wall channel — separate from the audio WS used by the "Call now" button). On `$connect`, the browser passes `?company=<tenantSlug>`; the Lambda authorizer resolves it to `companyId` and writes a row to `Connections`. DDB Streams on `Calls` and `Bookings` invoke a small **Fan-out Lambda** that does `apigatewaymanagementapi.post_to_connection(...)` to every active Wall connection for the matching `companyId`.
+- *Why API GW WebSocket:* AppSync is not on the allow-list; API GW WebSocket is. ~30 lines of fan-out code total.
+- *Fallback:* dumb 1Hz polling on a REST endpoint if the WS wiring eats too much time.
+
+**The "Call now" button** opens a *second* WebSocket (the audio channel) to the Input Agent Lambda, with PCM16 capture via `AudioWorklet`. Polly MP3 replies are buffered into an `AudioContext` and played back. The juror talks into their laptop mic — no PSTN, no phone, but the demo on-screen is indistinguishable from a real call (we still display a "+41 79 xxx" placeholder for theatre).
 
 **Layout:**
 ```
@@ -268,7 +311,7 @@
 +----------+--------------------------+-----------------------+
 ```
 
-Wall panes (all live via AppSync):
+Wall panes (all live via the Wall WebSocket):
 - **Call status** (left): Active/Idle, duration, caller number
 - **Transcript** (middle): Lara/Caller turns scroll in
 - **Slots** (top-right): fills per turn
@@ -281,9 +324,9 @@ Wall panes (all live via AppSync):
 
 - **Index:** S3 Vectors, dimension 1024 (Cohere multilingual v3)
 - **Per-tenant filter:** metadata `companyId` baked into chunk metadata at ingest
-- **Retrieval call** (from Input Agent as a Nova Sonic tool):
+- **Retrieval call** (from Input Agent as a Claude Sonnet 4.6 tool):
   - Top-K = 4, similarity threshold 0.55
-  - Returns 4 chunks max ~800 tokens, fed into Nova Sonic as a `<context>` block before answer generation
+  - Returns 4 chunks max ~800 tokens, fed into Claude as a `<context>` block in the tool-result before the next assistant turn
   - Returned citations written to `Calls.turn.citations` → Wall displays them
 - **Queries the agent makes mid-call:**
   - "How much is move-out cleaning per m²?"
@@ -291,6 +334,8 @@ Wall panes (all live via AppSync):
   - "What's the cancellation window?"
   - "Do you service postal code XYZ?"
 - **Why this matches the jury criterion:** demonstrably "meaningful RAG" — without it the agent invents prices. Citations on the Wall prove "the agent pulled this from chunk X".
+
+> **Latency note:** because we lost Nova Sonic's speech-to-speech advantage, the round-trip is Transcribe (~200-400 ms after end-of-speech) + Claude (~400-800 ms first token) + Polly (~100-200 ms first byte) ≈ **800-1400 ms time-to-first-audio**. Mitigations: stream Claude tokens; start Polly on the first sentence boundary; pre-warm Lambda; keep a "thinking…" earcon ready for any gap > 1.2 s.
 
 ---
 
@@ -306,7 +351,7 @@ Wall panes (all live via AppSync):
 ### Measured metrics (show as a slide)
 | Metric | Target | How measured |
 |---|---|---|
-| Time to first audio response | < 800 ms | Connect CloudWatch + AgentCore Trace |
+| Time to first audio response | < 1400 ms (p50), < 2000 ms (p95) | WS round-trip timestamps + AgentCore Trace |
 | Slot extraction accuracy | >= 5/6 on test calls | Manual rubric on 10 recorded calls |
 | KB retrieval precision@4 | >= 0.75 | Hand-graded 20 Q/A pairs |
 | Hallucination rate on out-of-scope questions | 0/10 | Hand-checked on 10 trick questions |
@@ -329,8 +374,8 @@ Wall panes (all live via AppSync):
 
 ### Horizontal scaling
 - DynamoDB on-demand + Lambda scale horizontally without provisioning
-- Bedrock Nova Sonic is regionally managed
-- AppSync subscriptions scale to 100k concurrent clients per endpoint out-of-the-box
+- Bedrock (Claude + KB), Transcribe Streaming, and Polly are all regionally managed and auto-scale
+- API Gateway WebSocket handles up to ~10k concurrent connections per endpoint out-of-the-box (multi-endpoint or quota raise for more)
 
 ### Global multi-region
 - `us-west-2` for the Americas, `eu-central-1` (Frankfurt) for EU/CH/UK, `ap-southeast-2` for APAC
@@ -338,10 +383,11 @@ Wall panes (all live via AppSync):
 - Compliance: GDPR via EU region, SOC2 as stack default
 
 ### Bottlenecks and mitigations
-- **Bedrock TPM quota:** Provisioned Throughput on top models, quota increase per ticket
-- **Connect concurrent calls:** service quota, regionally shardable
-- **Voice latency cross-region:** keep Bedrock inference in the same region as Connect
-- **Foundation-model lock-in:** the Bedrock abstraction allows model swap (Claude → Nova → Llama) without code changes
+- **Bedrock TPM quota:** Provisioned Throughput on Sonnet 4.6, quota increase per ticket
+- **Transcribe / Polly concurrency:** soft service quotas, raisable per ticket
+- **Voice latency cross-region:** keep Bedrock + Transcribe + Polly in the same region as the WS endpoint
+- **Foundation-model lock-in:** the Bedrock Converse abstraction allows model swap (Sonnet 4.6 → Opus 4.6 → Llama 4 Maverick — all on the allow-list) without code changes
+- **PSTN drop-in (post-hackathon):** Amazon Connect contact flow + KVS bridge plug into the same Input Agent — only the audio ingress changes
 
 ---
 
@@ -351,15 +397,15 @@ Assumption: **24 h hack, 3-4 people.** Numbers in hours.
 
 | # | Block | Owner | Hours | Mock-first? |
 |---|---|---|---|---|
-| 0 | Repo skeleton, AWS profile pinned, smoke_test green for everyone | All | 0.5 | - |
-| 1 | DDB tables + seed data (`Companies` with 1-2 tenants, `Crews`) | Backend A | 1 | - |
+| 0 | Repo skeleton, AWS profile pinned, smoke_test green for everyone (STS + Bedrock + Polly + Transcribe) | All | 0.5 | - |
+| 1 | DDB tables + seed data (`Companies` with 1-2 tenants, `Crews`, `Connections`) | Backend A | 1 | - |
 | 2 | KB: upload 3 PDFs (Pricelist, ServiceCatalog, FAQ), build index, smoke-test Retrieve | Backend B | 1.5 | - |
 | 3 | **Brain Lambda standalone** (input = JSON slots, output = JSON brain result; tools mocked on DDB) | Backend A | 2 | Yes — Brain works before voice exists |
-| 4 | **Live Call Wall v0** with hardcoded JSON from DDB; AppSync subscription works; all 4 panes (Status, Transcript, Slots, Brain, Citations) | Frontend | 4 | Yes — Wall works before agent does |
-| 5 | Connect instance + claimed phone number + Lex bot + bridging Lambda (echo first, then hello-loop) | Backend B | 3 | - |
-| 6 | Nova Sonic bidi integration in the Lambda; system prompt with persona + 6 questions | Backend A+B | 4 | - |
+| 4 | **Live Call Wall v0** + Wall WebSocket (API GW WS) + Fan-out Lambda; all 4 panes (Status, Transcript, Slots, Brain, Citations) driven by hardcoded DDB rows | Frontend + Backend A | 4 | Yes — Wall works before agent does |
+| 5 | Audio WebSocket (API GW WS) + Input Agent Lambda skeleton: PCM in → Transcribe Streaming → text echo back via Polly | Backend B | 3 | - |
+| 6 | Claude Sonnet 4.6 Converse integration in the Input Agent; system prompt with persona + 6 questions; barge-in handling | Backend A+B | 4 | - |
 | 7 | Tools wired: `save_slot`, `kb_lookup` (with citations), `compute_price` (sync Brain call), `end_call` | Backend A | 3 | - |
-| 8 | Multilingual test: second tenant with `locale=en-US`, different persona prompt | Backend B | 1.5 | - |
+| 8 | Multilingual test: second tenant with `locale=en-US`, different Polly voice + persona prompt | Backend B | 1.5 | - |
 | 9 | End-to-end rehearsal x3, latency measurement, fallbacks tested, Wall animations polished | All | 3 | - |
 | 10 | Slides + 60-sec script + scaling-story polish | Lead | 1.5 | - |
 
@@ -426,14 +472,16 @@ Assumption: **24 h hack, 3-4 people.** Numbers in hours.
 
 | Risk | Likelihood | Mitigation / Fallback |
 |---|---|---|
-| Connect call drops or audio glitches on stage | Medium | **Browser fallback:** a "Call now" button on the Wall opens a WebRTC mic and pipes audio to the same Nova Sonic Lambda via API Gateway WebSocket. Identical UX, no PSTN. |
-| Nova Sonic quality weak on Swiss-German | Medium | Force the agent to **answer in standard German** even when the caller speaks dialect; system prompt instruction. Fallback path: Transcribe + Claude + Polly Neural. |
-| Bedrock throttling mid-demo | Low-Med | **Provisioned Throughput** on Sonnet 4.6 + Nova Sonic for the demo window; cache KB retrieval responses for the 5 staged questions |
-| Wall doesn't update (AppSync wiring) | Medium | Polling fallback hidden behind `?poll=1` query string |
+| Browser mic permission denied on stage laptop | Low | Pre-grant permission in the demo browser profile; second laptop pre-warmed; fall back to a pre-recorded call video as last resort |
+| WebRTC audio glitches on conference Wi-Fi | Medium | Use the speaker's hotspot; PCM frame size = 20 ms (small) to mask packet loss; client-side jitter buffer ~100 ms |
+| Swiss-German recognition weak in Transcribe | Medium | Force the agent to **answer in standard German** even when the caller speaks dialect; system prompt instruction. Use `LanguageCode=de-CH` if available, else `de-DE` |
+| Bedrock throttling mid-demo | Low-Med | **Provisioned Throughput** on Sonnet 4.6 for the demo window; cache KB retrieval responses for the 5 staged questions |
+| Wall doesn't update (WS fan-out wiring) | Medium | Polling fallback hidden behind `?poll=1` query string; the Wall poll a `GET /calls/active` REST endpoint at 1 Hz |
 | Brain tool call is slow, voice response hangs | Medium | Brain is called *in parallel* to the voice loop (async fire); the answer is written to the Wall when ready — not blocked into the voice stream. Voice keeps replying normally. |
 | KB retrieval hallucinates on an edge question | Medium | The out-of-scope test is part of the demo — if the agent honestly says "I don't know", that's a **plus** for the jury, not a bug |
 | `us-west-2` latency from CH stage | Medium | Address it openly; show CloudWatch traces; explain Frankfurt roadmap |
-| Multilingual switch fails (persona stays DE) | Medium | Per tenant a separate test number in the demo phone's speed dial, each with a fixed-locale persona |
+| Multilingual switch fails (persona stays DE) | Medium | Per tenant a separate Wall URL in the demo browser's speed dial, each with a fixed-locale persona |
+| **Allow-list discovery mid-demo** (jury notices a service we shouldn't be using) | **Resolved** | Stack audited 2026-05-22 — only allow-listed services in the build; Connect / Nova Sonic / AppSync / SES are explicitly pitched as **roadmap items**, not part of the demo |
 
 ---
 
@@ -443,10 +491,10 @@ Assumption: **24 h hack, 3-4 people.** Numbers in hours.
 |---|---|
 | Clear problem + target user | Sec. 0, 11 |
 | Meaningful RAG | Sec. 7 + citations on Wall + anti-hallucination test (Sec. 8 scenario 3) |
-| Multimodal processing | Audio-as-modality: Nova Sonic speech-to-speech, real-time bidirectional |
+| Multimodal processing | Audio-as-modality: Transcribe Streaming (caller speech) + Polly Neural (agent voice), real-time bidirectional over WebRTC |
 | Agentic workflows | Input Agent makes 4 tool calls (kb_lookup, save_slot, compute_price, end_call); Brain is its own sub-agent with its own tools (Sec. 3.1, 3.2) |
 | Working demo | Sec. 6 (Wall), Sec. 8 (5 live scenarios), Sec. 12 (fallbacks) |
-| Technical creativity | Nova Sonic bidi + S3 Vectors + AgentCore Memory + live Brain call mid-conversation |
+| Technical creativity | WebRTC ↔ Transcribe Streaming ↔ Claude Sonnet 4.6 with tool-use ↔ Polly Neural ↔ WebRTC (full duplex via API GW WS) + S3 Vectors + AgentCore Memory + live Brain call mid-conversation |
 | Practical feasibility | Sec. 10 (realistic build order), Sec. 11 (all services GA) |
 | Evaluation / evidence | Sec. 8 (5 metrics incl. anti-hallucination, recordings, CSV) |
 | AWS usage + scaling | Sec. 2 (service table), Sec. 9 (multi-tenant, multi-region) |
@@ -458,10 +506,11 @@ Assumption: **24 h hack, 3-4 people.** Numbers in hours.
 
 When the team starts writing code, these are the files that exist first:
 
-- `c:/SideQuest/ColuseumHack/infrastructure/cdk_app.py` — single CDK app: Connect/Lex/Lambdas/DDB/AppSync/KB
-- `c:/SideQuest/ColuseumHack/lambdas/input_agent/handler.py` — Nova Sonic bidi bridge + tool dispatcher (kb_lookup, save_slot, compute_price, end_call)
+- `c:/SideQuest/ColuseumHack/infrastructure/cdk_app.py` — single CDK app: API GW WS (audio + wall), Lambdas, DDB, KB
+- `c:/SideQuest/ColuseumHack/lambdas/input_agent/handler.py` — Audio-WS handler: Transcribe Streaming bridge + Claude Converse loop + Polly TTS + tool dispatcher (kb_lookup, save_slot, compute_price, end_call)
 - `c:/SideQuest/ColuseumHack/lambdas/brain/handler.py` — Claude Sonnet 4.6 with tool-use loop for crew/price
-- `c:/SideQuest/ColuseumHack/web/src/CallWall.tsx` — AppSync subscription + 4-pane layout (Status, Transcript, Slots, Brain, Citations)
+- `c:/SideQuest/ColuseumHack/lambdas/wall_fanout/handler.py` — DDB Streams consumer that pushes updates to all Wall WS connections for the matching `companyId`
+- `c:/SideQuest/ColuseumHack/web/src/CallWall.tsx` — WS subscription + 4-pane layout (Status, Transcript, Slots, Brain, Citations) + "Call now" WebRTC mic capture button
 
 ---
 
@@ -469,14 +518,14 @@ When the team starts writing code, these are the files that exist first:
 
 Walk through before the pitch — every point must be green:
 
-1. **Smoke test** runs (`python smoke_test.py` → Bedrock reachable, Sonnet 4.6 responds)
-2. **Call the Connect number** from your own phone → persona greets in default language within 1s
-3. **Open the Wall** at the Amplify URL → empty 4-pane view visible, AppSync subscription connected (browser console green)
+1. **Smoke test** runs (`python smoke_test.py` → STS + Bedrock + Sonnet 4.6 + Polly + Transcribe all green)
+2. **Open the Wall** at the Amplify URL → empty 4-pane view visible, Wall WebSocket connected (browser console green)
+3. **Click "Call now"** → browser grants mic, audio WS opens, persona greets in tenant's default language within ~1.4 s
 4. **Run a test call:** all 6 slots fill in the Wall live while you speak
 5. **Mid-call FAQ:** "How much is window cleaning?" → answer with price from KB, **citation appears in the Wall**
 6. **Out-of-scope question:** "Do you also wash cars?" → agent says "I don't know" instead of hallucinating
 7. **Brain pane:** as soon as `what` + `area` are extracted, price + crew appear in the Wall (within 2s)
-8. **Hang up:** Wall shows "Call ended", transcript stays visible — no pipeline runs (by design)
-9. **Multilingual test:** second call in EN — persona switches automatically, slots are extracted correctly
+8. **End the call** (agent fires `end_call` or juror clicks "Hang up"): Wall shows "Call ended", transcript stays visible — no pipeline runs (by design)
+9. **Multilingual test:** open a second tab on the `en-US` tenant's Wall URL, click "Call now" → persona switches, Polly voice changes, slots are extracted correctly
 
 If any point fails → activate the corresponding fallback from Sec. 12.
