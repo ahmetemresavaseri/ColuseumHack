@@ -1,16 +1,15 @@
-"""DEPRECATED — Amazon Connect is NOT on the hackathon allow-list.
+"""Stage 1 — provision Amazon Connect for Atrium.
 
-This script provisioned an Amazon Connect instance + claimed PSTN number +
-contact flow. As of 2026-05-22 the Atrium hackathon build uses a Browser-WebRTC
-front door (see plan section "Architecture") instead of PSTN, because Amazon
-Connect is not on the event's allowed-services list.
+Idempotent. Re-running won't duplicate resources.
 
-Kept in the repo for the post-hackathon PSTN drop-in roadmap item. Do NOT run
-during the hackathon — `aws_helpers.connect_client()` was also removed, so
-this file will fail on import; that is intentional.
+Creates (or reuses):
+  1. Connect instance "atrium-demo"
+  2. A US DID phone number, claimed to that instance
+  3. A minimal "atrium-inbound" contact flow that plays a greeting
+     and (later) invokes our Lambda
+  4. Number-to-flow mapping
 
-To re-enable post-hackathon: restore `connect_client()` in aws_helpers.py and
-re-add `connect:*` to the Input Agent IAM role in deploy_lambda.py.
+Outputs final state to scripts/.connect_state.json (gitignored) for downstream steps.
 """
 from __future__ import annotations
 
@@ -20,18 +19,12 @@ import sys
 import time
 from pathlib import Path
 
-raise SystemExit(
-    "provision_connect.py is DEPRECATED for the hackathon — Amazon Connect is "
-    "not on the allow-list. Use the WebRTC front door (see infrastructure/cdk_app.py "
-    "and the 'Architecture' section of the plan)."
-)
-
 sys.path.insert(0, str(Path(__file__).parent))
 
 import boto3
 from botocore.exceptions import ClientError
 
-from aws_helpers import connect_client, get_account_id, region  # noqa: F401 — kept for the post-hackathon restore
+from aws_helpers import connect_client, get_account_id, region
 
 INSTANCE_ALIAS = "atrium-demo"
 CONTACT_FLOW_NAME = "atrium-inbound"
