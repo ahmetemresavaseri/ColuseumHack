@@ -1,0 +1,3 @@
+case_id,company_id,question,expected_source,expected_answer_contains,status,notes
+faq-001,glanz-ag,Do you clean offices outside normal hours?,faq.md,evening,pending,
+price-001,glanz-ag,How much is move-out cleaning per square meter?,pricelist.md,4.50,pending,

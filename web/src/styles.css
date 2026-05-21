@@ -1,0 +1,125 @@
+:root {
+  color: #172026;
+  background: #f4f7f6;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+button {
+  border: 1px solid #b9c7c2;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #172026;
+  padding: 0.55rem 0.8rem;
+}
+
+.wall {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px;
+}
+
+.wallHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.wallHeader h1,
+.panel h2 {
+  margin: 0;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: #53635f;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.panel {
+  border: 1px solid #d9e2df;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.statusPanel,
+.transcriptPanel {
+  grid-column: span 2;
+}
+
+.citationsPanel {
+  grid-column: span 4;
+}
+
+dl,
+p {
+  margin: 0;
+}
+
+dt {
+  color: #60716c;
+  font-size: 0.78rem;
+}
+
+dd {
+  margin: 0 0 10px;
+  font-weight: 650;
+}
+
+.slotGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.turnList {
+  display: grid;
+  gap: 10px;
+}
+
+.turn p,
+.citationsPanel p {
+  margin-top: 4px;
+  color: #33413d;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .wall {
+    padding: 18px;
+  }
+
+  .wallHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .statusPanel,
+  .transcriptPanel,
+  .citationsPanel {
+    grid-column: span 1;
+  }
+}

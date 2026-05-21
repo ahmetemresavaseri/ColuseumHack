@@ -1,0 +1,18 @@
+[
+  {
+    "companyId": "glanz-ag",
+    "crewId": "crew-zurich-1",
+    "name": "Zurich Crew 1",
+    "skills": ["MOVE_OUT_CLEANING", "OFFICE_CLEANING", "WINDOW_CLEANING"],
+    "capacityHoursPerDay": 8,
+    "serviceArea": "Zurich"
+  },
+  {
+    "companyId": "glanz-ag",
+    "crewId": "crew-zurich-2",
+    "name": "Zurich Crew 2",
+    "skills": ["CONSTRUCTION_CLEANING", "FACILITY_MAINTENANCE"],
+    "capacityHoursPerDay": 6,
+    "serviceArea": "Zurich"
+  }
+]

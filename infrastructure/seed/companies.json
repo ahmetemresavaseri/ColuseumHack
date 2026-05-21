@@ -1,0 +1,13 @@
+[
+  {
+    "companyId": "glanz-ag",
+    "name": "Glanz AG",
+    "phoneNumber": "TBD",
+    "locale": "de-CH",
+    "currency": "CHF",
+    "unitSystem": "metric",
+    "timezone": "Europe/Zurich",
+    "voicePersonaPrompt": "You are Sarah, a calm multilingual receptionist for Glanz AG.",
+    "kbPrefix": "companies/glanz-ag/"
+  }
+]
