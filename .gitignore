@@ -1,0 +1,52 @@
+# --- Local environment / secrets ---
+.env
+.env.local
+.env.local.*
+.env.*.local
+*.pem
+*.key
+.aws/
+.aws-*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node / Web ---
+node_modules/
+.next/
+*.log
+.DS_Store
+
+# --- AWS / CDK ---
+cdk.out/
+cdk.context.json
+.cdk.staging/
+
+# --- Lambda build artifacts ---
+lambdas/**/dist/
+lambdas/**/build/
+lambdas/**/*.zip
+lambda_layers/**/python/
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- OS ---
+Thumbs.db
+desktop.ini

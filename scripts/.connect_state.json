@@ -1,0 +1,16 @@
+{
+  "InstanceId": "cd52cc91-81db-47cb-99e8-00dfae128840",
+  "InstanceArn": "arn:aws:connect:us-west-2:160659473263:instance/cd52cc91-81db-47cb-99e8-00dfae128840",
+  "InstanceAlias": "atrium-demo",
+  "ContactFlowId": "9f83db57-6613-417b-a01a-1adfc5e863b5",
+  "ContactFlowName": "atrium-inbound",
+  "PhoneNumberId": "d2a4e97c-501c-4d5d-833a-2ab9778c6ffa",
+  "PhoneNumberArn": "arn:aws:connect:us-west-2:160659473263:phone-number/d2a4e97c-501c-4d5d-833a-2ab9778c6ffa",
+  "PhoneNumber": "+15612820331",
+  "PhoneNumberType": "DID",
+  "Region": "us-west-2",
+  "AccountId": "160659473263",
+  "LambdaFunctionArn": "arn:aws:lambda:us-west-2:160659473263:function:atrium-input-agent",
+  "LambdaFunctionName": "atrium-input-agent",
+  "LambdaRoleArn": "arn:aws:iam::160659473263:role/atrium-input-agent-role"
+}
