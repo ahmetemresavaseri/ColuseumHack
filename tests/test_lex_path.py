@@ -102,6 +102,40 @@ def test_bare_number_lands_in_elicited_area_not_rooms():
     assert _bare_number_fallback("what", "five") is None
 
 
+def test_bare_number_strips_leading_a():
+    """ASR commonly prepends 'a ' before the real utterance."""
+    from handler import _bare_number_fallback
+    assert _bare_number_fallback("rooms", "a five") == 5
+    assert _bare_number_fallback("rooms", "a 5") == 5
+    assert _bare_number_fallback("area", "a fifty square meters") == "50 m2" or \
+           _bare_number_fallback("area", "a fifty") == "50 m2"
+    assert _bare_number_fallback("when", "a in three days") == "in three days"
+
+
+def test_urgency_derived_from_when():
+    from handler import _derive_urgency_from_when
+    assert _derive_urgency_from_when("today") == "high"
+    assert _derive_urgency_from_when("tomorrow") == "high"
+    assert _derive_urgency_from_when("in three days") == "medium"
+    assert _derive_urgency_from_when("in two days") == "high"
+    assert _derive_urgency_from_when("next week") == "medium"
+    assert _derive_urgency_from_when("this week") == "high"
+    assert _derive_urgency_from_when("whenever") == "low"
+    assert _derive_urgency_from_when("flexible") == "low"
+    assert _derive_urgency_from_when("monday") == "medium"
+    assert _derive_urgency_from_when("urgent") == "high"
+    assert _derive_urgency_from_when("") is None
+
+
+def test_looks_like_email_rejects_questions():
+    from handler import _looks_like_email
+    assert not _looks_like_email("i have another question")
+    assert not _looks_like_email("no thanks")
+    assert not _looks_like_email("")
+    assert _looks_like_email("a@b.com")
+    assert _looks_like_email("Customer.Name+demo@example.co.uk")
+
+
 def test_when_fallback_accepts_free_text():
     """'in three days', 'next monday morning' — calendar phrases don't match
     our keyword list but must still flow through to Bookings.slots."""

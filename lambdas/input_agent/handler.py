@@ -241,9 +241,26 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     attrs["bookingId"] = booking_id
     attrs["companyId"] = company_id
 
-    # Phase = "asking_email": if the caller just gave us their email, advance.
+    # Derive urgency from `when` if the caller hasn't said anything urgent-
+    # flavored explicitly. Avoids asking "how urgent?" when "in three days"
+    # already gave us enough.
+    if _slot_filled(state, "when") and not _slot_filled(state, "urgency"):
+        derived = _derive_urgency_from_when(str(state.when))
+        if derived:
+            state.update("urgency", derived)
+            lex_slots["urgency"] = _to_lex_slot_value(derived)
+            save_slot_adapter(
+                call_id=call_id, booking_id=booking_id,
+                slot="urgency", value=derived,
+            )
+
+    # Phase = "asking_email": validate the email the caller just gave us.
+    # A bare "i have another question" should NOT be accepted as an email —
+    # treat such replies as FAQ questions (if they look like one) or as a
+    # re-prompt trigger otherwise.
     if phase == "asking_email":
-        if _slot_filled(state, "email"):
+        email_value = str(state.email or "")
+        if _slot_filled(state, "email") and _looks_like_email(email_value):
             attrs["phase"] = "any_questions"
             prompt = (
                 "Before we wrap up — do you have any questions about our "
@@ -256,11 +273,34 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
                 intent_name=intent.get("name", lex_v2.INTENT_NAME),
                 intent_slots=lex_slots,
             )
+
+        # Caller's reply wasn't an email — undo the bad save.
+        if _slot_filled(state, "email"):
+            try:
+                save_slot_adapter(
+                    call_id=call_id, booking_id=booking_id,
+                    slot="email", value="",
+                )
+            except Exception:  # pragma: no cover
+                pass
+            lex_slots.pop("email", None)
+            state.update("email", None)
+
+        answer_prefix = ""
+        citations = []
+        if transcript and _is_question(transcript):
+            kb_result = kb_lookup(transcript, company_id, top_k=3)
+            answer, citations = _compose_faq_answer(kb_result)
+            answer_prefix = f"{answer} "
+
         prompt = (
-            "Sorry, I didn't catch that. What email address should I send "
-            "the confirmation to?"
+            f"{answer_prefix}What email address should I send the "
+            "confirmation to?"
         )
-        _log_agent_turn(call_id, company_id, prompt)
+        _log_agent_turn(
+            call_id, company_id, prompt,
+            citations=citations or None,
+        )
         return lex_v2.elicit_slot(
             "email", prompt,
             session_attributes=attrs,
@@ -489,20 +529,18 @@ def _handle_faq_turn(
     attrs["companyId"] = company_id
 
     if final:
-        # We're in the "any questions?" phase — answer + speak the closing
-        # price summary in one breath, then hang up.
-        close_tail = _compose_close_message(booking_id, state)
-        response_text = f"{answer} {close_tail}"
+        # We're in the "any questions?" phase — answer + invite another
+        # question. Only close when the caller has nothing more (handled in
+        # `_finalize_after_questions`). This lets the caller keep asking
+        # follow-ups instead of being hung up on after one answer.
+        followup = "Is there anything else I can help with?"
+        response_text = f"{answer} {followup}"
         _log_agent_turn(call_id, company_id, response_text, citations=citations)
-        if USE_REAL_DDB:
-            try:
-                ddb.end_call(call_id, booking_id, reason="completed")
-            except Exception as exc:  # pragma: no cover
-                logger.warning("end_call failed: %s", exc)
-        return lex_v2.close_session(
-            response_text,
+        return lex_v2.elicit_slot(
+            "email", response_text,
             session_attributes=attrs,
             intent_name=intent.get("name", lex_v2.INTENT_NAME),
+            intent_slots=lex_slots,
         )
 
     next_slot = next(
@@ -715,10 +753,14 @@ def _bare_number_fallback(slot: str, raw: str) -> Any | None:
       "next monday morning" don't match our regex but are still meaningful for
       the wall and the operator. Cap at 60 chars to avoid swallowing FAQs the
       question detector missed.
+
+    All slots also strip a leading lone letter — ASR commonly prepends "a "
+    before the real utterance ("a five", "a in three days").
     """
+    import re as _re
+    raw = _re.sub(r"^\s*[a-zA-Z]\.?\s+", "", raw).strip()
     if slot in {"area", "rooms"}:
-        text = raw.strip().rstrip(".").lower()
-        import re as _re
+        text = raw.rstrip(".").lower()
         m = _re.match(r"^\s*(\d+(?:\.\d+)?)\s*$", text)
         if m:
             n = float(m.group(1))
@@ -733,10 +775,7 @@ def _bare_number_fallback(slot: str, raw: str) -> Any | None:
             return f"{n} m2"
         return n
     if slot == "when":
-        cleaned = raw.strip().rstrip(".").strip()
-        # ASR often prepends a lone single letter ("a in three days") — drop it.
-        import re as _re
-        cleaned = _re.sub(r"^\s*[a-zA-Z]\.?\s+", "", cleaned).strip()
+        cleaned = raw.rstrip(".").strip()
         if 0 < len(cleaned) <= 60:
             return cleaned
     return None
@@ -759,6 +798,65 @@ def _state_from_lex_slots(lex_slots: dict[str, Any]) -> SlotState:
 def _slot_filled(state: SlotState, slot: str) -> bool:
     value = getattr(state, slot, None)
     return value not in (None, "")
+
+
+def _looks_like_email(text: str) -> bool:
+    """Strict email shape check: must contain an @ and a TLD-like suffix.
+
+    Used in the asking_email phase to reject captures like 'i have another
+    question' that the cleaner didn't normalize.
+    """
+    if not text:
+        return False
+    import re as _re
+    return bool(_re.search(r"[\w.+-]+@[\w-]+\.[\w-]{2,}", text))
+
+
+def _derive_urgency_from_when(when_text: str) -> str | None:
+    """Infer urgency from the spoken `when` so we don't ask redundantly.
+
+    Returns None for ambiguous phrases — handler will fall back to eliciting
+    `urgency` explicitly only when this can't decide.
+    """
+    if not when_text:
+        return None
+    import re as _re
+    lowered = when_text.lower().strip()
+    if any(k in lowered for k in (
+        "today", "asap", "right now", "right away",
+        "urgent", "emergency", "immediately", "as soon",
+    )):
+        return "high"
+    if "tomorrow" in lowered:
+        return "high"
+    # "in N days" — small N is high, larger is medium.
+    word_to_int = {"one":1, "two":2, "three":3, "four":4, "five":5,
+                   "six":6, "seven":7, "eight":8, "nine":9, "ten":10}
+    m = _re.search(r"in\s+(\d+|" + "|".join(word_to_int) + r")\s+days?", lowered)
+    if m:
+        token = m.group(1)
+        n = word_to_int.get(token) or (int(token) if token.isdigit() else 0)
+        if n and n <= 2:
+            return "high"
+        if n and n <= 7:
+            return "medium"
+        if n:
+            return "low"
+    if "this week" in lowered:
+        return "high"
+    if "next week" in lowered or "next month" in lowered:
+        return "medium"
+    if any(k in lowered for k in ("flexible", "whenever", "no rush", "any time", "anytime")):
+        return "low"
+    # Day-of-week mentioned without other qualifiers — assume medium.
+    weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    if any(d in lowered for d in weekdays):
+        return "medium"
+    # Default for any non-empty when phrase the caller bothered to specify:
+    # treat as medium rather than asking redundantly.
+    if len(lowered) >= 3:
+        return "medium"
+    return None
 
 
 _SERVICE_SPOKEN = {

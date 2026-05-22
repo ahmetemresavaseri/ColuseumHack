@@ -127,8 +127,9 @@ def test_handle_faq_turn_refuses_unknown(monkeypatch):
     assert response["sessionState"]["dialogAction"]["slotToElicit"] == "when"
 
 
-def test_handle_faq_turn_final_closes_after_questions_phase(monkeypatch):
-    """When `final=True`, the FAQ branch should answer + close, not re-elicit."""
+def test_handle_faq_turn_final_loops_for_more_questions(monkeypatch):
+    """When `final=True` (any_questions phase), the FAQ branch should answer
+    AND invite another question, not hang up after one answer."""
     monkeypatch.delenv("DDB_BACKEND", raising=False)
     _stub_kb(monkeypatch)
     lex_slots = {
@@ -140,12 +141,13 @@ def test_handle_faq_turn_final_closes_after_questions_phase(monkeypatch):
         event={"sessionState": {"intent": {"name": "CollectBooking"}}},
         intent={"name": "CollectBooking"},
         lex_slots=lex_slots,
-        attrs={"questionsPrompted": "1"},
+        attrs={"phase": "any_questions"},
         call_id="c1", booking_id="b1", company_id="glanz-ag",
         final=True,
     )
-    assert response["sessionState"]["dialogAction"]["type"] == "Close"
-    assert response["sessionState"]["intent"]["state"] == "Fulfilled"
+    assert response["sessionState"]["dialogAction"]["type"] == "ElicitSlot"
+    spoken = response["messages"][0]["content"]
+    assert "anything else" in spoken.lower()
 
 
 def test_estimate_phase_spoken_after_5_booking_slots(monkeypatch):
