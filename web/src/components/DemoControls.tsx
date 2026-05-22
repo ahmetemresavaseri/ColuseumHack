@@ -23,17 +23,18 @@ export function DemoControls({
       <button type="button" onClick={onSimulate} className="primary">
         Simulate
       </button>
-      <button type="button" onClick={onClear}>
+      <button type="button" onClick={onClear} className="secondary">
         Clear
       </button>
       {inCall ? (
-        <button type="button" onClick={onHangUp}>
+        <button type="button" onClick={onHangUp} className="secondary">
           Hang up (mic)
         </button>
       ) : canCall ? (
         <button
           type="button"
           onClick={onCallNow}
+          className="secondary"
           title="Fallback only — use the Connect phone number for the real demo"
         >
           Call via mic

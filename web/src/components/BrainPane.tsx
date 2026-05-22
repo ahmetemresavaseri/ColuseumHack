@@ -19,9 +19,9 @@ const REASON_LABEL: Record<string, string> = {
 export function BrainPane({ brain }: { brain: BrainEstimate | null }) {
   if (!brain) {
     return (
-      <section className="panel">
-        <p className="eyebrow">Brain</p>
-        <h2>—</h2>
+      <section className="panel brainPanel">
+        <p className="eyebrow">Total Cost</p>
+        <h2 className="brainPriceIdle">—</h2>
         <p className="placeholder">
           Waiting for enough slots to estimate the price.
         </p>
@@ -30,13 +30,11 @@ export function BrainPane({ brain }: { brain: BrainEstimate | null }) {
   }
   const feas = brain.feasibility;
   return (
-    <section className="panel">
-      <p className="eyebrow">Brain</p>
+    <section className="panel brainPanel">
+      <p className="eyebrow">Total Cost</p>
       <h2>
         {brain.currency} {brain.price.toFixed(2)}
       </h2>
-      <p>{brain.serviceType}</p>
-      <p>{brain.needsPhotos ? "Photos requested after call" : "No photos needed"}</p>
       {feas ? (
         <div className="feasibility">
           <span className={`feasChip feasChip--${feas.status}`}>
