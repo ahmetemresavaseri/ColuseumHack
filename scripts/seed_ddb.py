@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from decimal import Decimal
 from pathlib import Path
 
 import boto3
@@ -23,10 +24,15 @@ def put_all(table_name: str, records: list[dict]) -> None:
     print(f"[OK] Seeded {len(records)} records into {table.table_name}")
 
 
+def _load(name: str) -> list[dict]:
+    return json.loads((SEED / name).read_text(), parse_float=Decimal)
+
+
 def main() -> int:
-    put_all("COMPANIES_TABLE", json.loads((SEED / "companies.json").read_text()))
-    put_all("CREWS_TABLE", json.loads((SEED / "crews.json").read_text()))
-    put_all("PRICE_MATRIX_TABLE", json.loads((SEED / "price_matrix.json").read_text()))
+    put_all("COMPANIES_TABLE", _load("companies.json"))
+    put_all("CREWS_TABLE", _load("crews.json"))
+    put_all("PRICE_MATRIX_TABLE", _load("price_matrix.json"))
+    put_all("KNOWLEDGE_ITEMS_TABLE", _load("knowledge_items.json"))
     return 0
 
 

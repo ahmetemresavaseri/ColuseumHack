@@ -8,6 +8,11 @@
 .aws/
 .aws-*
 
+# --- Google Service Account keys ---
+**/service-account*.json
+**/google-credentials*.json
+local/credentials/
+
 # --- Python ---
 __pycache__/
 *.py[cod]

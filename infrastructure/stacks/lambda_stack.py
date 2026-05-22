@@ -48,10 +48,16 @@ class LambdaStack(cdk.Stack):
             data.companies_table,
             data.crews_table,
             data.price_matrix_table,
+            data.knowledge_items_table,
         ]:
             table.grant_read_write_data(self.input_agent)
             table.grant_read_data(self.brain)
             table.grant_read_data(self.wall_api)
+
+        for fn in (self.input_agent, self.brain, self.wall_api):
+            fn.add_environment("KNOWLEDGE_ITEMS_TABLE", data.knowledge_items_table.table_name)
+            fn.add_environment("COMPANIES_TABLE", data.companies_table.table_name)
+            fn.add_environment("PRICE_MATRIX_TABLE", data.price_matrix_table.table_name)
 
         rag.kb_bucket.grant_read(self.input_agent)
         rag.recordings_bucket.grant_read_write(self.input_agent)

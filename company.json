@@ -1,0 +1,325 @@
+{
+  "project": "Atrium Cleaning Quote Engine",
+  "version": "hackathon_mvp",
+  "currency": "CHF",
+  "timezone": "Europe/Zurich",
+  "purpose": "Estimate cleaning price, time, crew, vehicle and equipment during a live AI phone call.",
+
+  "required_slots": [
+    "service_type",
+    "area_m2",
+    "rooms",
+    "bathrooms",
+    "urgency",
+    "email"
+  ],
+
+  "optional_slots": [
+    "condition",
+    "addons",
+    "preferred_date",
+    "postcode",
+    "where"
+  ],
+
+  "default_values": {
+    "condition": "normal",
+    "bathrooms": 1,
+    "urgency": "standard",
+    "addons": []
+  },
+
+  "service_types": {
+    "regular_cleaning": {
+      "label": "Regular home cleaning",
+      "base_fee": 60,
+      "price_per_m2": 1.2,
+      "price_per_room": 20,
+      "price_per_bathroom": 35,
+      "minutes_per_m2": 2,
+      "minutes_per_room": 15,
+      "minutes_per_bathroom": 25,
+      "minimum_price": 120
+    },
+    "deep_cleaning": {
+      "label": "Deep cleaning",
+      "base_fee": 100,
+      "price_per_m2": 2.5,
+      "price_per_room": 35,
+      "price_per_bathroom": 50,
+      "minutes_per_m2": 4,
+      "minutes_per_room": 25,
+      "minutes_per_bathroom": 40,
+      "minimum_price": 220
+    },
+    "move_out_cleaning": {
+      "label": "Move-out cleaning",
+      "base_fee": 180,
+      "price_per_m2": 4.2,
+      "price_per_room": 55,
+      "price_per_bathroom": 80,
+      "minutes_per_m2": 5,
+      "minutes_per_room": 35,
+      "minutes_per_bathroom": 55,
+      "minimum_price": 420
+    },
+    "office_cleaning": {
+      "label": "Office cleaning",
+      "base_fee": 90,
+      "price_per_m2": 1.8,
+      "price_per_room": 15,
+      "price_per_bathroom": 40,
+      "minutes_per_m2": 2,
+      "minutes_per_room": 10,
+      "minutes_per_bathroom": 30,
+      "minimum_price": 180
+    },
+    "construction_cleaning": {
+      "label": "Construction cleaning",
+      "base_fee": 250,
+      "price_per_m2": 6.5,
+      "price_per_room": 60,
+      "price_per_bathroom": 90,
+      "minutes_per_m2": 7,
+      "minutes_per_room": 40,
+      "minutes_per_bathroom": 60,
+      "minimum_price": 550
+    },
+    "window_cleaning": {
+      "label": "Window cleaning",
+      "base_fee": 80,
+      "price_per_m2": 5,
+      "price_per_room": 0,
+      "price_per_bathroom": 0,
+      "minutes_per_m2": 6,
+      "minutes_per_room": 0,
+      "minutes_per_bathroom": 0,
+      "minimum_price": 150
+    }
+  },
+
+  "urgency_rules": {
+    "flexible": {
+      "label": "Flexible date",
+      "multiplier": 1.0,
+      "fixed_fee": 0
+    },
+    "standard": {
+      "label": "Within 7 days",
+      "multiplier": 1.05,
+      "fixed_fee": 0
+    },
+    "urgent": {
+      "label": "Within 48 hours",
+      "multiplier": 1.15,
+      "fixed_fee": 30
+    },
+    "same_day": {
+      "label": "Same day",
+      "multiplier": 1.3,
+      "fixed_fee": 60
+    },
+    "weekend": {
+      "label": "Weekend",
+      "multiplier": 1.2,
+      "fixed_fee": 40
+    }
+  },
+
+  "condition_rules": {
+    "light": {
+      "label": "Light cleaning needed",
+      "multiplier": 0.9
+    },
+    "normal": {
+      "label": "Normal condition",
+      "multiplier": 1.0
+    },
+    "heavy": {
+      "label": "Very dirty or neglected",
+      "multiplier": 1.25
+    },
+    "unknown": {
+      "label": "Condition unknown",
+      "multiplier": 1.1
+    }
+  },
+
+  "addons": {
+    "oven": {
+      "label": "Oven cleaning",
+      "price": 80,
+      "minutes": 45
+    },
+    "fridge": {
+      "label": "Fridge cleaning",
+      "price": 45,
+      "minutes": 25
+    },
+    "extractor_hood": {
+      "label": "Extractor hood cleaning",
+      "price": 50,
+      "minutes": 30
+    },
+    "balcony": {
+      "label": "Balcony cleaning",
+      "price": 70,
+      "minutes": 45
+    },
+    "inside_windows": {
+      "label": "Inside window cleaning",
+      "price": 90,
+      "minutes": 60
+    },
+    "blinds": {
+      "label": "Blinds cleaning",
+      "price": 80,
+      "minutes": 50
+    }
+  },
+
+  "personnel_rules": {
+    "default_min": 2,
+    "tiers_by_m2": [
+      {"max_m2": 60,   "people": 2},
+      {"max_m2": 120,  "people": 3},
+      {"max_m2": 200,  "people": 4},
+      {"max_m2": 9999, "people": 5}
+    ],
+    "category_overrides": {
+      "construction_cleaning": {"add_people": 1, "reason": "heavy debris handling"},
+      "window_cleaning":       {"override_people": 2, "reason": "fixed 2-person scaffold team"},
+      "office_cleaning":       {"per_100m2": 1, "min": 2, "reason": "one cleaner per 100m2 of office"}
+    },
+    "rooms_bonus": {
+      "rule": "if rooms >= threshold add +add_people",
+      "threshold": 5,
+      "add_people": 1
+    }
+  },
+
+  "vehicles": {
+    "van-s": {"label": "Small van",            "cargo_m3": 4,  "cost_per_job": 30},
+    "van-m": {"label": "Mid-size van",         "cargo_m3": 9,  "cost_per_job": 60},
+    "van-l": {"label": "Large van + trailer",  "cargo_m3": 18, "cost_per_job": 120}
+  },
+
+  "vehicle_rules": {
+    "by_category": {
+      "regular_cleaning":      "van-s",
+      "office_cleaning":       "van-m",
+      "deep_cleaning":         "van-m",
+      "window_cleaning":       "van-s",
+      "move_out_cleaning":     "van-m",
+      "construction_cleaning": "van-l"
+    },
+    "upgrade_if_m2_above": {"m2": 180, "to": "van-l"}
+  },
+
+  "equipment": {
+    "industrial_vacuum":  {"label": "Industrial vacuum",        "cost_per_use": 5},
+    "mop_set":            {"label": "Mop & bucket set",         "cost_per_use": 2},
+    "eco_detergent_kit":  {"label": "Eco detergent kit",        "cost_per_use": 8},
+    "pressure_washer":    {"label": "Pressure washer",          "cost_per_use": 15},
+    "scaffold_3m":        {"label": "Scaffold 3m",              "cost_per_use": 25},
+    "ladder_2m":          {"label": "Ladder 2m",                "cost_per_use": 3},
+    "window_kit":         {"label": "Pro window kit",           "cost_per_use": 10},
+    "construction_kit":   {"label": "Construction debris kit",  "cost_per_use": 20}
+  },
+
+  "equipment_rules": {
+    "by_category": {
+      "regular_cleaning":      ["industrial_vacuum", "mop_set", "eco_detergent_kit"],
+      "office_cleaning":       ["industrial_vacuum", "mop_set", "eco_detergent_kit"],
+      "deep_cleaning":         ["industrial_vacuum", "mop_set", "eco_detergent_kit", "pressure_washer"],
+      "move_out_cleaning":     ["industrial_vacuum", "mop_set", "eco_detergent_kit", "ladder_2m"],
+      "window_cleaning":       ["window_kit", "ladder_2m", "scaffold_3m"],
+      "construction_cleaning": ["construction_kit", "industrial_vacuum", "pressure_washer", "scaffold_3m"]
+    }
+  },
+
+  "locations": {
+    "depot-zh-altstetten": {"name": "Depot Altstetten", "postcode": "8048", "lat": 47.391, "lng": 8.489},
+    "depot-zh-oerlikon":   {"name": "Depot Oerlikon",   "postcode": "8050", "lat": 47.412, "lng": 8.546}
+  },
+
+  "postcode_centroids": {
+    "8001": {"lat": 47.371, "lng": 8.542},
+    "8002": {"lat": 47.362, "lng": 8.530},
+    "8003": {"lat": 47.373, "lng": 8.515},
+    "8004": {"lat": 47.374, "lng": 8.524},
+    "8005": {"lat": 47.385, "lng": 8.522},
+    "8037": {"lat": 47.388, "lng": 8.530},
+    "8048": {"lat": 47.391, "lng": 8.489},
+    "8050": {"lat": 47.412, "lng": 8.546},
+    "8051": {"lat": 47.413, "lng": 8.564},
+    "8052": {"lat": 47.420, "lng": 8.547},
+    "8057": {"lat": 47.402, "lng": 8.540}
+  },
+
+  "crews": {
+    "crew-zh-1": {
+      "name": "Zurich Crew 1",
+      "homeDepot": "depot-zh-altstetten",
+      "serviceArea": ["8000", "8001", "8002", "8003", "8004", "8005", "8048"],
+      "skills": ["regular_cleaning", "office_cleaning", "move_out_cleaning", "deep_cleaning", "window_cleaning"],
+      "googleCalendarId": "<CALENDAR_ID_1>"
+    },
+    "crew-zh-2": {
+      "name": "Zurich Crew 2",
+      "homeDepot": "depot-zh-oerlikon",
+      "serviceArea": ["8037", "8050", "8051", "8052", "8057"],
+      "skills": ["construction_cleaning", "deep_cleaning", "window_cleaning", "move_out_cleaning"],
+      "googleCalendarId": "<CALENDAR_ID_2>"
+    }
+  },
+
+  "business_hours": {
+    "weekdays": [0, 1, 2, 3, 4],
+    "start_hour": 8,
+    "end_hour": 18,
+    "slot_step_minutes": 30
+  },
+
+  "pricing_formula": {
+    "labor_per_person_per_hour": 60,
+    "travel_cost_per_km": 1.5,
+    "materials_per_m2": 0.3,
+    "formula": {
+      "estimated_minutes_total": "service_types[cat].minutes_per_m2 * area_m2 + minutes_per_room * rooms + minutes_per_bathroom * bathrooms + sum(addons[a].minutes for a in selected_addons)",
+      "wall_clock_minutes":      "estimated_minutes_total / people",
+      "labor":     "people * (wall_clock_minutes / 60) * labor_per_person_per_hour",
+      "vehicle":   "vehicles[selected_vehicle].cost_per_job + 2 * crew.distanceKm * travel_cost_per_km",
+      "equipment": "sum(equipment[e].cost_per_use for e in selected_equipment)",
+      "materials": "area_m2 * materials_per_m2",
+      "addons":    "sum(addons[a].price for a in selected_addons)",
+      "subtotal":  "labor + vehicle + equipment + materials + addons",
+      "total":     "max(subtotal * urgency_multiplier * condition_multiplier + urgency_fixed_fee, service_types[cat].minimum_price)",
+      "range":     "[total * 0.9, total * 1.1]"
+    }
+  },
+
+  "sample_input": {
+    "service_type": "move_out_cleaning",
+    "area_m2": 75,
+    "rooms": 3,
+    "bathrooms": 1,
+    "urgency": "standard",
+    "condition": "normal",
+    "addons": ["oven", "blinds"],
+    "email": "customer@example.com",
+    "preferred_date": "2026-05-29",
+    "postcode": "8001",
+    "where": "8001 Zurich"
+  },
+
+  "photo_rules": {
+    "needs_photos_if": [
+      "condition is heavy",
+      "condition is unknown",
+      "service_type is construction_cleaning",
+      "area_m2 is greater than 150",
+      "addons include balcony and area is unknown"
+    ]
+  }
+}
