@@ -127,8 +127,9 @@ def test_handle_faq_turn_refuses_unknown(monkeypatch):
     assert response["sessionState"]["dialogAction"]["slotToElicit"] == "when"
 
 
-def test_handle_faq_turn_final_closes_after_questions_phase(monkeypatch):
-    """When `final=True`, the FAQ branch should answer + close, not re-elicit."""
+def test_handle_faq_turn_final_loops_for_more_questions(monkeypatch):
+    """When `final=True` (any_questions phase), the FAQ branch should answer
+    AND invite another question, not hang up after one answer."""
     monkeypatch.delenv("DDB_BACKEND", raising=False)
     _stub_kb(monkeypatch)
     lex_slots = {
@@ -140,40 +141,40 @@ def test_handle_faq_turn_final_closes_after_questions_phase(monkeypatch):
         event={"sessionState": {"intent": {"name": "CollectBooking"}}},
         intent={"name": "CollectBooking"},
         lex_slots=lex_slots,
-        attrs={"questionsPrompted": "1"},
+        attrs={"phase": "any_questions"},
         call_id="c1", booking_id="b1", company_id="glanz-ag",
         final=True,
     )
-    assert response["sessionState"]["dialogAction"]["type"] == "Close"
-    assert response["sessionState"]["intent"]["state"] == "Fulfilled"
+    assert response["sessionState"]["dialogAction"]["type"] == "ElicitSlot"
+    spoken = response["messages"][0]["content"]
+    assert "anything else" in spoken.lower()
 
 
-def test_questions_prompt_appears_after_all_slots_filled(monkeypatch):
-    """On the turn after the last slot is captured, the handler should ask
-    'any questions?' before closing."""
+def test_estimate_phase_spoken_after_5_booking_slots(monkeypatch):
+    """When the 5 booking slots are all filled, the handler should compute
+    the estimate, speak it, and advance to phase=estimate_spoken (NOT jump
+    straight to "any questions?")."""
     from handler import handle_lex_event
     monkeypatch.delenv("DDB_BACKEND", raising=False)
     _stub_kb(monkeypatch)
-    # All 6 slots already filled in Lex's view; no question asked yet.
     slots = {
         s: {"value": {"originalValue": v, "interpretedValue": v}}
         for s, v in [
             ("when", "tomorrow"), ("what", "OFFICE_CLEANING"),
             ("area", "30 m2"), ("rooms", "3"), ("urgency", "high"),
-            ("location", "Bahnhofstrasse 12, 8001 Zürich"),
         ]
     }
     event = {
         "messageVersion": "1.0", "invocationSource": "DialogCodeHook",
         "sessionId": "fake-session",
         "inputTranscript": "",
-        "bot": {"id": "b", "name": "atrium-input-agent", "version": "2",
+        "bot": {"id": "b", "name": "atrium-input-agent", "version": "3",
                 "localeId": "en_US", "aliasId": "a", "aliasName": "live"},
         "sessionState": {"sessionAttributes": {"callId":"c1","bookingId":"b1","companyId":"glanz-ag"},
                          "intent": {"name": "CollectBooking", "slots": slots, "state": "InProgress"}},
     }
     response = handle_lex_event(event)
     assert response["sessionState"]["dialogAction"]["type"] == "ElicitSlot"
-    assert response["sessionState"]["sessionAttributes"]["questionsPrompted"] == "1"
+    assert response["sessionState"]["sessionAttributes"]["phase"] == "estimate_spoken"
     spoken = response["messages"][0]["content"]
-    assert "questions" in spoken.lower()
+    assert "questions" not in spoken.lower()
