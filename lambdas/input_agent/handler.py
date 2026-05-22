@@ -121,8 +121,23 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     # map (Lambda is stateless; DynamoDB is for the Wall fan-out, not for
     # rehydrating between Lex hops). We mirror the slots into our SlotState
     # for the extractor, then write back the updated map.
+    #
+    # If Lex matched FallbackIntent (caller's first utterance didn't match
+    # any CollectBooking sample), promote to CollectBooking using the
+    # secondary interpretation Lex provided. CollectBooking owns the 6
+    # slots we elicit.
     intent = event.get("sessionState", {}).get("intent", {}) or {}
+    if intent.get("name") == "FallbackIntent":
+        intent = _promote_to_collect_booking(event) or intent
     lex_slots: dict[str, Any] = dict(intent.get("slots") or {})
+
+    # Lex's built-in slot elicitation stores the *whole caller utterance* as
+    # the slot value (because we use AMAZON.FreeFormInput). Run each captured
+    # value back through our deterministic extractor so e.g.
+    #   when="Tomorrow for 85 square meters" → when="tomorrow"
+    # The Wall (and downstream Brain) wants the canonical value, not the
+    # raw transcript.
+    lex_slots = _clean_lex_slots(lex_slots)
     state = _state_from_lex_slots(lex_slots)
 
     transcript = lex_v2.get_input_transcript(event)
@@ -191,6 +206,47 @@ def _to_lex_slot_value(value: Any) -> dict[str, Any]:
             "resolvedValues": [str(value)],
         }
     }
+
+
+def _promote_to_collect_booking(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the CollectBooking interpretation out of Lex's alternatives.
+
+    Lex sends a list of `interpretations`. When confidence on CollectBooking
+    is below Lex's match threshold (often the case in voice), Lex picks
+    FallbackIntent as the matched intent but still surfaces CollectBooking
+    as a candidate. We promote it so the rest of the handler can elicit
+    the right slots.
+    """
+    for interp in event.get("interpretations") or []:
+        ent = interp.get("intent") or {}
+        if ent.get("name") == "CollectBooking":
+            return ent
+    return {"name": "CollectBooking", "slots": {}, "state": "InProgress"}
+
+
+def _clean_lex_slots(lex_slots: dict[str, Any]) -> dict[str, Any]:
+    """Run each Lex auto-captured slot value through the deterministic extractor.
+
+    Lex stores `originalValue=<full caller utterance>` when using
+    AMAZON.FreeFormInput. If the extractor finds a clean canonical value for
+    the *same* slot inside that text, we replace the Lex value with ours.
+    """
+    cleaned: dict[str, Any] = {}
+    for slot, payload in lex_slots.items():
+        if not isinstance(payload, dict):
+            cleaned[slot] = payload
+            continue
+        raw = ((payload.get("value") or {}).get("originalValue") or "").strip()
+        if not raw:
+            cleaned[slot] = payload
+            continue
+        pairs = extract_slots_deterministic(raw, SlotState())
+        canonical = next((v for s, v in pairs if s == slot), None)
+        if canonical is not None and str(canonical) != raw:
+            cleaned[slot] = _to_lex_slot_value(canonical)
+        else:
+            cleaned[slot] = payload
+    return cleaned
 
 
 def _state_from_lex_slots(lex_slots: dict[str, Any]) -> SlotState:
