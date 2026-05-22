@@ -232,7 +232,20 @@ function inflateWallEvent(row: WallRow): WallEvent | null {
       return { ...base, type: "AgentSpeakingStart" };
     case "AgentSpeakingEnd":
       return { ...base, type: "AgentSpeakingEnd" };
-    case "BrainEstimate":
+    case "BrainEstimate": {
+      const feasibilityRaw = payload.feasibility as
+        | { status?: string; reasons?: string[]; confidence?: number }
+        | undefined;
+      const feasibility = feasibilityRaw?.status
+        ? {
+            status: feasibilityRaw.status as
+              | "bookable"
+              | "needs_review"
+              | "unsupported",
+            reasons: feasibilityRaw.reasons ?? [],
+            confidence: Number(feasibilityRaw.confidence ?? 0),
+          }
+        : undefined;
       return {
         ...base,
         type: "BrainEstimate",
@@ -240,7 +253,9 @@ function inflateWallEvent(row: WallRow): WallEvent | null {
         price: Number(payload.price) || 0,
         currency: String(payload.currency || ""),
         needsPhotos: Boolean(payload.needsPhotos),
+        feasibility,
       };
+    }
     case "Error":
       return { ...base, type: "Error", message: String(payload.message || "") };
     default:

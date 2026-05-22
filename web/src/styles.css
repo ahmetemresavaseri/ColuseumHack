@@ -143,6 +143,56 @@ code {
   letter-spacing: 0.02em;
 }
 
+.feasibility {
+  margin-top: 10px;
+}
+
+.feasChip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.feasChip--bookable {
+  background: #def4e6;
+  color: #1b5e4f;
+  border: 1px solid #b6e2c5;
+}
+
+.feasChip--needs_review {
+  background: #fff3d6;
+  color: #8a5a00;
+  border: 1px solid #f0d28a;
+}
+
+.feasChip--unsupported {
+  background: #fadcd6;
+  color: #8a2018;
+  border: 1px solid #f0a89c;
+}
+
+.feasReasons {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.feasReasons li {
+  font-size: 0.78rem;
+  color: #53635f;
+  background: #f4f7f6;
+  border: 1px solid #d9e2df;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
 @media (max-width: 760px) {
   .wall {
     padding: 18px;

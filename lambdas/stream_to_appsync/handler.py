@@ -212,19 +212,21 @@ def _from_bookings(
             )
 
     if new_brain and new_brain != old_brain and "price" in new_brain:
+        payload = {
+            "serviceType": new_brain.get("serviceType", ""),
+            "price": _as_float(new_brain.get("price")),
+            "currency": new_brain.get("currency", ""),
+            "needsPhotos": bool(new_brain.get("needsPhotos", False)),
+        }
+        feasibility = new_brain.get("feasibility") or {}
+        if feasibility:
+            payload["feasibility"] = {
+                "status": feasibility.get("status", ""),
+                "reasons": list(feasibility.get("reasons") or []),
+                "confidence": _as_float(feasibility.get("confidence", 0)),
+            }
         events.append(
-            _wall_event(
-                "BrainEstimate",
-                call_id,
-                company_id,
-                ts,
-                {
-                    "serviceType": new_brain.get("serviceType", ""),
-                    "price": _as_float(new_brain.get("price")),
-                    "currency": new_brain.get("currency", ""),
-                    "needsPhotos": bool(new_brain.get("needsPhotos", False)),
-                },
-            )
+            _wall_event("BrainEstimate", call_id, company_id, ts, payload)
         )
     return events
 

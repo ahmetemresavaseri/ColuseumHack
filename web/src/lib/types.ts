@@ -26,11 +26,20 @@ export type Citation = {
   excerpt: string;
 };
 
+export type FeasibilityStatus = "bookable" | "needs_review" | "unsupported";
+
+export type Feasibility = {
+  status: FeasibilityStatus;
+  reasons: string[];
+  confidence: number;
+};
+
 export type BrainEstimate = {
   serviceType: string;
   price: number;
   currency: string;
   needsPhotos: boolean;
+  feasibility?: Feasibility;
 };
 
 export type CallStatus = "Idle" | "Live" | "Ended" | "Error";
@@ -119,6 +128,7 @@ export type BrainEstimateEvent = WallEventBase & {
   price: number;
   currency: string;
   needsPhotos?: boolean;
+  feasibility?: Feasibility;
 };
 
 export type WallEvent =

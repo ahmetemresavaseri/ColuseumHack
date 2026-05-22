@@ -46,3 +46,28 @@ def test_end_call_emits_clean_payload():
 
 def test_unknown_tool_returns_error():
     assert dispatch_tool("not_a_tool", {})["error"].startswith("unknown_tool")
+
+
+def test_feasibility_assessment_tool_bookable():
+    result = dispatch_tool(
+        "feasibility_assessment",
+        {
+            "slots": {"what": "OFFICE_CLEANING", "area": 50, "rooms": 4},
+            "brain": {
+                "status": "estimated",
+                "serviceType": "OFFICE_CLEANING",
+                "needsPhotos": False,
+                "crew": {"crewId": "c1", "capacityHoursPerDay": 8},
+            },
+            "crews": [{"crewId": "c1"}],
+        },
+    )
+    assert result["status"] == "bookable"
+
+
+def test_feasibility_assessment_tool_unsupported():
+    result = dispatch_tool(
+        "feasibility_assessment",
+        {"slots": {}, "brain": {"status": "needs_service_type"}, "crews": []},
+    )
+    assert result["status"] == "unsupported"

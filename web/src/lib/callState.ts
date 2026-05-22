@@ -113,6 +113,7 @@ export function reduceCall(call: LiveCall, event: WallEvent): LiveCall {
           price: event.price,
           currency: event.currency,
           needsPhotos: event.needsPhotos ?? false,
+          feasibility: event.feasibility,
         },
       };
 

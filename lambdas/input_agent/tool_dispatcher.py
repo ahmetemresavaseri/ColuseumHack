@@ -23,6 +23,7 @@ try:
 except ImportError:  # pragma: no cover
     boto3 = None  # type: ignore
 
+from feasibility import assess as assess_feasibility
 from kb import kb_lookup
 from slot_adapter import save_slot as save_slot_adapter
 
@@ -82,10 +83,26 @@ def _end_call(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _feasibility_assessment(args: dict[str, Any]) -> dict[str, Any]:
+    """Standalone feasibility check; doesn't need Brain Lambda.
+
+    Brain Lambda already bundles a feasibility result on each compute_price
+    response, so most callers get it for free. This dispatcher entry exists
+    so an agent (or test harness) can call `feasibility_assessment` without
+    invoking the Brain Lambda end-to-end.
+    """
+    return assess_feasibility(
+        slots=args.get("slots", {}) or {},
+        brain=args.get("brain", {}) or {},
+        crews=args.get("crews") or [],
+    )
+
+
 TOOLS: dict[str, Tool] = {
     "kb_lookup": _kb_lookup,
     "save_slot": _save_slot,
     "compute_price": _compute_price,
+    "feasibility_assessment": _feasibility_assessment,
     "end_call": _end_call,
 }
 

@@ -204,13 +204,16 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     )
 
     if next_slot is None or lex_v2.get_invocation_source(event) == "FulfillmentCodeHook":
+        # Read back the brain estimate (computed mid-call) so we can speak
+        # the price + feasibility before hanging up.
+        close_message = _compose_close_message(booking_id, state)
         if USE_REAL_DDB:
             try:
                 ddb.end_call(call_id, booking_id, reason="completed")
             except Exception as exc:  # pragma: no cover
                 logger.warning("end_call failed: %s", exc)
         return lex_v2.close_session(
-            "All set — I have everything I need. Goodbye!",
+            close_message,
             session_attributes=attrs,
             intent_name=intent.get("name", lex_v2.INTENT_NAME),
         )
@@ -300,6 +303,67 @@ def _slot_filled(state: SlotState, slot: str) -> bool:
     return value not in (None, "")
 
 
+_SERVICE_SPOKEN = {
+    "MOVE_OUT_CLEANING": "move-out cleaning",
+    "OFFICE_CLEANING": "office cleaning",
+    "CONSTRUCTION_CLEANING": "construction cleaning",
+    "WINDOW_CLEANING": "window cleaning",
+    "FACILITY_MAINTENANCE": "facility maintenance",
+}
+
+_CURRENCY_SPOKEN = {
+    "CHF": "Swiss francs",
+    "EUR": "euros",
+    "USD": "US dollars",
+    "GBP": "pounds",
+}
+
+
+def _compose_close_message(booking_id: str, state: SlotState) -> str:
+    """Speak the price + feasibility back to the caller before hanging up."""
+    fallback = "All set — I have everything I need. Thanks for calling. Goodbye!"
+    if not USE_REAL_DDB:
+        return fallback
+    try:
+        booking = ddb.get_booking(booking_id) or {}
+    except Exception as exc:  # pragma: no cover
+        logger.warning("close: get_booking failed: %s", exc)
+        return fallback
+
+    brain = booking.get("brain") or {}
+    price = brain.get("price")
+    if price is None:
+        return fallback
+
+    service = _SERVICE_SPOKEN.get(brain.get("serviceType", ""), "your cleaning")
+    currency = _CURRENCY_SPOKEN.get(str(brain.get("currency", "")), str(brain.get("currency", "")))
+    try:
+        price_str = f"{float(price):.0f}"
+    except (TypeError, ValueError):
+        price_str = str(price)
+
+    parts = [f"For the {service}, the estimate is {price_str} {currency}."]
+    feasibility = brain.get("feasibility") or {}
+    status = feasibility.get("status")
+    reasons = feasibility.get("reasons") or []
+    if status == "needs_review":
+        if "photos_required" in reasons:
+            parts.append("We'll send a short email asking for a couple of photos before we confirm.")
+        elif "no_crew_assigned" in reasons:
+            parts.append("Someone from our team will reach out shortly to confirm a crew.")
+        elif "large_area" in reasons or "large_rooms" in reasons or "over_capacity" in reasons:
+            parts.append("Because of the size, our team will follow up to confirm the final quote.")
+        else:
+            parts.append("Our team will follow up to confirm the booking shortly.")
+    elif status == "unsupported":
+        parts = ["I'm sorry, that service isn't one we offer right now. Our team will be in touch."]
+    else:
+        parts.append("We'll send a confirmation to your email. Thanks for calling Glanz AG. Goodbye!")
+        return " ".join(parts)
+    parts.append("Goodbye!")
+    return " ".join(parts)
+
+
 def _maybe_compute_brain(
     *,
     call_id: str,
@@ -349,6 +413,8 @@ def _maybe_compute_brain(
     }
     if result.get("crew"):
         brain_payload["crew"] = result["crew"]
+    if result.get("feasibility"):
+        brain_payload["feasibility"] = result["feasibility"]
     ddb.save_brain(booking_id, brain_payload)
     logger.info("BRAIN saved: %s", brain_payload)
 
