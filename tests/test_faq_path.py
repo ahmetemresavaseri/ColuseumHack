@@ -150,6 +150,64 @@ def test_handle_faq_turn_final_loops_for_more_questions(monkeypatch):
     assert "anything else" in spoken.lower()
 
 
+def test_yes_in_any_questions_waits_for_actual_question(monkeypatch):
+    """Caller saying 'yes' to 'any questions?' means they have one but
+    haven't asked yet. The handler must invite the question, not close."""
+    from handler import handle_lex_event
+    monkeypatch.delenv("DDB_BACKEND", raising=False)
+    _stub_kb(monkeypatch)
+    event = {
+        "messageVersion": "1.0", "invocationSource": "DialogCodeHook",
+        "sessionId": "fake-session",
+        "inputTranscript": "yes",
+        "bot": {"id": "b", "name": "atrium-input-agent", "version": "4",
+                "localeId": "en_US", "aliasId": "a", "aliasName": "live"},
+        "sessionState": {
+            "sessionAttributes": {
+                "callId": "c1", "bookingId": "b1", "companyId": "glanz-ag",
+                "phase": "any_questions",
+            },
+            "intent": {
+                "name": "CollectBooking",
+                "slots": {"location": {"value": {"originalValue": "yes", "interpretedValue": "yes"}}},
+                "state": "InProgress",
+            },
+        },
+    }
+    response = handle_lex_event(event)
+    assert response["sessionState"]["dialogAction"]["type"] == "ElicitSlot"
+    assert response["sessionState"]["sessionAttributes"]["awaitingFollowUpQuestion"] == "1"
+    spoken = response["messages"][0]["content"]
+    assert "what would you like to know" in spoken.lower()
+
+
+def test_no_in_any_questions_closes(monkeypatch):
+    """'no thanks' in any_questions closes the call."""
+    from handler import handle_lex_event
+    monkeypatch.delenv("DDB_BACKEND", raising=False)
+    _stub_kb(monkeypatch)
+    event = {
+        "messageVersion": "1.0", "invocationSource": "DialogCodeHook",
+        "sessionId": "fake-session",
+        "inputTranscript": "no thanks",
+        "bot": {"id": "b", "name": "atrium-input-agent", "version": "4",
+                "localeId": "en_US", "aliasId": "a", "aliasName": "live"},
+        "sessionState": {
+            "sessionAttributes": {
+                "callId": "c1", "bookingId": "b1", "companyId": "glanz-ag",
+                "phase": "any_questions",
+            },
+            "intent": {
+                "name": "CollectBooking",
+                "slots": {"location": {"value": {"originalValue": "no thanks", "interpretedValue": "no thanks"}}},
+                "state": "InProgress",
+            },
+        },
+    }
+    response = handle_lex_event(event)
+    assert response["sessionState"]["dialogAction"]["type"] == "Close"
+
+
 def test_estimate_phase_spoken_after_5_booking_slots(monkeypatch):
     """When the 5 booking slots are all filled, the handler should compute
     the estimate, speak it, and advance to phase=estimate_spoken (NOT jump

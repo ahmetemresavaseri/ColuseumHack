@@ -156,11 +156,36 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
 
     if phase == "any_questions":
         if transcript and _is_question(transcript):
+            # Real question — KB answer, then re-prompt for more questions.
+            attrs.pop("awaitingFollowUpQuestion", None)
             return _handle_faq_turn(
                 transcript=transcript, event=event, intent=intent,
                 lex_slots=lex_slots, attrs=attrs,
                 call_id=call_id, booking_id=booking_id, company_id=company_id,
                 final=True,
+            )
+        if (
+            transcript
+            and _is_affirmative(transcript)
+            and attrs.get("awaitingFollowUpQuestion") != "1"
+        ):
+            # Caller said "yes" — they intend to ask but haven't yet. Invite
+            # the actual question; one-shot flag so a second bare "yes" closes.
+            attrs["awaitingFollowUpQuestion"] = "1"
+            attrs["callId"] = call_id
+            attrs["bookingId"] = booking_id
+            attrs["companyId"] = company_id
+            _log_caller_turn(call_id, company_id, transcript)
+            prompt = "Sure, what would you like to know?"
+            _log_agent_turn(call_id, company_id, prompt)
+            elicited = _just_elicited_slot(lex_slots, transcript)
+            if elicited:
+                lex_slots.pop(elicited, None)
+            return lex_v2.elicit_slot(
+                "location", prompt,
+                session_attributes=attrs,
+                intent_name=intent.get("name", lex_v2.INTENT_NAME),
+                intent_slots=lex_slots,
             )
         return _finalize_after_questions(
             transcript=transcript, event=event, intent=intent,
@@ -877,6 +902,24 @@ _REACTION_PHRASES = {
     "sounds good", "that works", "no thanks", "yes please",
     "yep", "nope", "yeah", "nah", "uh huh", "mhm",
 }
+
+_AFFIRMATIVE_PHRASES = {
+    "yes", "yeah", "yep", "yup", "sure", "i do", "yes please",
+    "of course", "absolutely", "ok yes", "yes i do", "i have a question",
+    "i have one",
+}
+
+
+def _is_affirmative(text: str) -> bool:
+    """True if the caller said something that means 'yes, I have a question'.
+
+    Used in the any_questions phase: a bare 'yes' shouldn't close the call —
+    the caller is signaling they want to ask something but haven't yet.
+    """
+    if not text:
+        return False
+    lowered = text.strip().lower().rstrip(".,!?")
+    return lowered in _AFFIRMATIVE_PHRASES
 
 
 def _looks_like_location(text: str) -> bool:
