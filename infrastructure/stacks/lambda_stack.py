@@ -11,6 +11,8 @@ from pathlib import Path
 
 import aws_cdk as cdk
 from aws_cdk import aws_appsync as appsync
+from aws_cdk import aws_events as events
+from aws_cdk import aws_events_targets as events_targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda_event_sources as event_sources
 from aws_cdk import aws_lambda as lambda_
@@ -226,6 +228,32 @@ class LambdaStack(cdk.Stack):
                 retry_attempts=2,
             )
         )
+
+        # Warmers ----------------------------------------------------------
+        # Caller-perceived latency on the first turn is dominated by Lambda
+        # cold start (init ~400ms + first invoke time). Fire a no-op invoke
+        # every 4 minutes on the call-path Lambdas to keep them warm; the
+        # handlers short-circuit when `event.warmer == True`.
+        warmer_schedule = events.Schedule.rate(cdk.Duration.minutes(4))
+        warmer_payload = events.RuleTargetInput.from_object({"warmer": True})
+
+        warmer_input = events.Rule(
+            self, "InputAgentWarmer",
+            schedule=warmer_schedule,
+            description="Keep the Input Agent Lambda warm for low first-turn latency.",
+        )
+        warmer_input.add_target(events_targets.LambdaFunction(
+            self.input_agent, event=warmer_payload,
+        ))
+
+        warmer_brain = events.Rule(
+            self, "BrainWarmer",
+            schedule=warmer_schedule,
+            description="Keep the Brain Lambda warm so the live estimate fires fast.",
+        )
+        warmer_brain.add_target(events_targets.LambdaFunction(
+            self.brain, event=warmer_payload,
+        ))
 
         # Outputs ----------------------------------------------------------
         cdk.CfnOutput(self, "WallGraphQLUrl", value=self.graphql_api.attr_graph_ql_url)

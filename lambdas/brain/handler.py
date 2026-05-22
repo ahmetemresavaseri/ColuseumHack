@@ -17,6 +17,10 @@ from pricing import estimate_price
 
 
 def handler(event: dict[str, Any], context) -> dict[str, Any]:
+    # EventBridge warmer ping — short-circuit so we don't run DDB lookups.
+    if isinstance(event, dict) and event.get("warmer"):
+        return {"status": "warm"}
+
     company_id = event.get("companyId", "glanz-ag")
     slots = event.get("slots", event)
 

@@ -1329,6 +1329,12 @@ def _decode_body(event: dict[str, Any]) -> tuple[str | None, bytes | None, dict[
 
 
 def lambda_handler(event, context):  # noqa: ANN001
+    # EventBridge cron pings (see lambda_stack.py) keep the execution
+    # environment warm so first-turn latency isn't dominated by cold-start.
+    # Short-circuit before any heavy work.
+    if isinstance(event, dict) and event.get("warmer"):
+        return {"status": "warm"}
+
     logger.info("ATRIUM_EVENT %s", json.dumps(event, default=str)[:1500])
 
     if lex_v2.is_lex_event(event):
