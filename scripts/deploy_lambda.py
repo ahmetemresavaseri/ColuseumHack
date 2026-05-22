@@ -14,9 +14,14 @@ State is written to `scripts/.deploy_state.json`.
 """
 from __future__ import annotations
 
+import base64
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -182,16 +187,109 @@ def ensure_role() -> str:
     return arn
 
 
+def _pip_install_requirements(dest: Path) -> None:
+    """Install requirements.txt into `dest` so they ship inside the Lambda zip."""
+    req = LAMBDA_DIR / "requirements.txt"
+    if not req.exists():
+        return
+    # Skip if the file is effectively empty (only comments / blank lines).
+    has_pkg = any(
+        line.strip() and not line.strip().startswith("#")
+        for line in req.read_text(encoding="utf-8").splitlines()
+    )
+    if not has_pkg:
+        return
+
+    print(f"{WAIT} pip install -r requirements.txt -> {dest.name}/ ...")
+    cmd = [
+        sys.executable, "-m", "pip", "install",
+        "-r", str(req),
+        "-t", str(dest),
+        "--quiet", "--no-compile",
+        # Lambda Python 3.13 runs Linux x86_64; force matching wheels.
+        "--platform", "manylinux2014_x86_64",
+        "--only-binary=:all:",
+        "--python-version", "3.13",
+        "--implementation", "cp",
+        "--upgrade",
+    ]
+    try:
+        subprocess.check_call(cmd)
+    except subprocess.CalledProcessError as exc:
+        # Fall back to a permissive install if cross-platform wheel pick fails
+        # (e.g. dev box on macOS arm64 with no manylinux wheel cached).
+        print(f"{WAIT} cross-platform pip failed ({exc}); retrying without platform pinning")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "-r", str(req), "-t", str(dest),
+            "--quiet", "--no-compile", "--upgrade",
+        ])
+
+
 def package_zip() -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+    with tempfile.TemporaryDirectory(prefix="atrium-input-agent-") as tmp:
+        build_dir = Path(tmp)
+        # 1. Copy the .py sources
         for src in LAMBDA_DIR.rglob("*.py"):
-            arcname = src.relative_to(LAMBDA_DIR).as_posix()
-            z.write(src, arcname)
+            rel = src.relative_to(LAMBDA_DIR)
+            dst = build_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+        # 2. Install runtime deps alongside the sources
+        _pip_install_requirements(build_dir)
+
+        # 3. Zip the build dir
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for path in build_dir.rglob("*"):
+                if path.is_file():
+                    arc = path.relative_to(build_dir).as_posix()
+                    # Trim pip metadata noise to keep the zip small.
+                    if "/__pycache__/" in f"/{arc}/" or arc.endswith(".pyc"):
+                        continue
+                    z.write(path, arc)
+
     buf.seek(0)
     data = buf.read()
-    print(f"{OK} Packaged {len(data)} bytes from {LAMBDA_DIR}")
+    print(f"{OK} Packaged {len(data)} bytes from {LAMBDA_DIR} (+ vendored deps)")
     return data
+
+
+def _load_calendar_env() -> dict[str, str]:
+    """Read local Google Calendar config and shape it for Lambda env vars.
+
+    Looks for:
+      - local/credentials/service-account.json  (gitignored)  → GOOGLE_SA_JSON_B64
+      - local/.env CALENDAR_ID_CREW_ZH_1                       → GOOGLE_CALENDAR_ID
+    Silently skips missing pieces so deploys still work without calendar wiring.
+    """
+    env: dict[str, str] = {}
+    sa_path = ROOT / "local" / "credentials" / "service-account.json"
+    if sa_path.exists():
+        try:
+            raw = sa_path.read_bytes()
+            env["GOOGLE_SA_JSON_B64"] = base64.b64encode(raw).decode("ascii")
+            print(f"{OK} Bundled Google service-account JSON via env var ({len(raw)} bytes)")
+        except Exception as exc:
+            print(f"{WAIT} skipped service-account.json: {exc}")
+    else:
+        print(f"{WAIT} no service-account.json at {sa_path} — calendar tool will soft-fail")
+
+    dotenv_path = ROOT / "local" / ".env"
+    if dotenv_path.exists():
+        for line in dotenv_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if key == "CALENDAR_ID_CREW_ZH_1" and value and "GOOGLE_CALENDAR_ID" not in env:
+                env["GOOGLE_CALENDAR_ID"] = value
+                print(f"{OK} GOOGLE_CALENDAR_ID set from local/.env")
+
+    env.setdefault("ATRIUM_TIMEZONE", "Europe/Zurich")
+    return env
 
 
 def function_exists(name: str) -> bool:
@@ -215,10 +313,15 @@ def wait_active(name: str, timeout: int = 60) -> None:
 
 def deploy_function(role_arn: str, zip_bytes: bytes) -> str:
     lc = lambda_client()
+    env_vars = _load_calendar_env()
     if function_exists(FUNCTION_NAME):
         print(f"{WAIT} Updating existing function {FUNCTION_NAME} ...")
         lc.update_function_code(FunctionName=FUNCTION_NAME, ZipFile=zip_bytes)
         wait_active(FUNCTION_NAME)
+        # Merge so we don't clobber other env vars set out-of-band.
+        existing = (lc.get_function_configuration(FunctionName=FUNCTION_NAME)
+                    .get("Environment", {}).get("Variables", {})) or {}
+        merged = {**existing, **env_vars}
         lc.update_function_configuration(
             FunctionName=FUNCTION_NAME,
             Runtime=RUNTIME,
@@ -226,6 +329,7 @@ def deploy_function(role_arn: str, zip_bytes: bytes) -> str:
             Role=role_arn,
             Timeout=TIMEOUT_S,
             MemorySize=MEMORY_MB,
+            Environment={"Variables": merged},
         )
         wait_active(FUNCTION_NAME)
     else:
@@ -240,7 +344,8 @@ def deploy_function(role_arn: str, zip_bytes: bytes) -> str:
                     Code={"ZipFile": zip_bytes},
                     Timeout=TIMEOUT_S,
                     MemorySize=MEMORY_MB,
-                    Description="Atrium Input Agent — WebRTC audio WS bridge (Transcribe + Claude + Polly)",
+                    Description="Atrium Input Agent — Lex CodeHook (Bedrock + Google Calendar)",
+                    Environment={"Variables": env_vars} if env_vars else {"Variables": {}},
                 )
                 break
             except ClientError as e:

@@ -4,7 +4,7 @@ export type SlotKey =
   | "area"
   | "rooms"
   | "urgency"
-  | "email";
+  | "location";
 
 export type SlotMap = {
   when: string;
@@ -12,7 +12,7 @@ export type SlotMap = {
   area: string;
   rooms: string;
   urgency: string;
-  email: string;
+  location: string;
 };
 
 export type TranscriptTurn = {

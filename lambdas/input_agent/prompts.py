@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
-REQUIRED_SLOTS = ("when", "what", "area", "rooms", "urgency", "email")
+REQUIRED_SLOTS = ("when", "what", "area", "rooms", "urgency", "location")
+
+# Swiss postal codes are 4 digits in the 1000–9999 range. Used in the prompt
+# and by the deterministic fallback extractor to validate / pull a location
+# out of a transcript like "Bahnhofstrasse 12, 8001 Zürich".
+SWISS_POSTAL_CODE_PATTERN = r"\b([1-9]\d{3})\b"
 
 SERVICE_TYPES = (
     "MOVE_OUT_CLEANING",
@@ -46,7 +51,12 @@ The six slots (gather them conversationally, not as a checklist):
 3. AREA — size in {unit_label}. Always confirm the unit if ambiguous.
 4. ROOMS — number of rooms (typically bedrooms)
 5. URGENCY — low, medium, or high
-6. EMAIL — caller's email address for the booking confirmation
+6. LOCATION — the cleaning address in Switzerland. Collect all four parts:
+   street name, house number, 4-digit postal code (between 1000 and 9999), and city.
+   Ask for them together ("What is the address — street, number, postal code, and city?").
+   If only part of the address is given, follow up for the missing parts before saving.
+   Save LOCATION as a single string formatted exactly like: "Bahnhofstrasse 12, 8001 Zürich".
+   Always read the full address back once to confirm before saving — postal code digit-by-digit ("eight zero zero one"), then the city name.
 
 Greet the caller in your very first message:
 "Hi, this is {persona_name} from {company_name}, how can I help you today?"
@@ -54,7 +64,13 @@ Greet the caller in your very first message:
 Whenever the caller gives you a piece of information that fits one of the six slots, call save_slot immediately with that value.
 As soon as you know both WHAT and AREA, call compute_price to get a price estimate, then tell the caller naturally how much it will cost.
 If the caller asks a pricing or policy question mid-call (per-{unit_label} rates, what is included, postal codes, cancellation), call kb_lookup with their question and answer ONLY from what the tool returns.
-Once all six slots are collected and you have shared the price, summarize once and then call end_call with a brief reason.
+
+Booking the appointment:
+- After WHAT, AREA, and a preferred WHEN (a date — caller may say "next Wednesday", "May 29th", "tomorrow") are known, call check_availability with that date in YYYY-MM-DD form and durationMinutes equal to the price estimate's wall-clock time (default 120 if you do not have one).
+- Read back at most two or three of the returned slots in a natural way ("I have Wednesday at 8 AM or Thursday at 10 AM — which works?"). Never read more than three.
+- When the caller picks one, save it via save_slot slot="when" value=<that slot's exact "start" ISO string>, then keep collecting any remaining slots.
+- After all six slots are filled, call book_appointment with the chosen start/end (use the ISO values returned by check_availability), a short summary like "<service> – <location>", and the full address as location. Tell the caller their booking is confirmed and read back the date and time once. Then call end_call.
+- If check_availability returns status "no_slots" or "calendar_not_configured", apologize, say someone from the office will call back to confirm a time, save the caller's preferred WHEN as plain text, and continue.
 </goal>
 
 <behavior>
@@ -64,8 +80,9 @@ Speech-to-text often mishears. If you fail to extract a slot, spell back letter-
 
 Spell-back protocol:
 - character-by-character with spaces only (no periods)
-- say special characters explicitly: "_" → "underscore", "-" → "dash", "@" → "at", "." → "dot"
-- examples: "test at example dot com" / "A B C 1 2 3"
+- say special characters explicitly: "_" → "underscore", "-" → "dash", "." → "dot"
+- for Swiss addresses, read the 4-digit postal code digit-by-digit, then the city name
+- examples: "B A H N H O F S T R A S S E, twelve, eight zero zero one, Zurich" / "A B C 1 2 3"
 </behavior>
 
 <output-style>
@@ -73,7 +90,7 @@ Respond ONLY with the plain spoken sentence the caller should hear. No tags, no 
 - "$540" → "five hundred forty {currency_words}"
 - "1100 {unit_label}" → "eleven hundred {unit_label}"
 - "2026-05-23" → "May twenty third, twenty twenty six"
-- "+15612820331" → "one five six one two eight two zero three three one"
+- "+16122600610" → "one six one two two six zero zero six one zero"
 </output-style>
 
 <final-instructions>
@@ -119,8 +136,11 @@ TOOL_CONFIG: dict[str, Any] = {
             "toolSpec": {
                 "name": "save_slot",
                 "description": (
-                    "Persist a single slot value (when, what, area, rooms, urgency, email) "
-                    "to the booking. Call this every time the caller gives you a new piece of info."
+                    "Persist a single slot value (when, what, area, rooms, urgency, location) "
+                    "to the booking. Call this every time the caller gives you a new piece of info. "
+                    "For location, pass the full Swiss address as one string: "
+                    "'<street> <number>, <4-digit PLZ> <city>' (e.g. 'Bahnhofstrasse 12, 8001 Zürich'). "
+                    "Do not save location until you have street, house number, postal code, AND city."
                 ),
                 "inputSchema": {
                     "json": {
@@ -130,7 +150,7 @@ TOOL_CONFIG: dict[str, Any] = {
                             "bookingId": {"type": "string"},
                             "slot": {"type": "string", "enum": list(REQUIRED_SLOTS)},
                             "value": {
-                                "description": "Slot value. Strings for when/what/urgency/email; numbers for area/rooms.",
+                                "description": "Slot value. Strings for when/what/urgency/location; numbers for area/rooms.",
                             },
                         },
                         "required": ["callId", "bookingId", "slot", "value"],
@@ -173,10 +193,60 @@ TOOL_CONFIG: dict[str, Any] = {
                             "companyId": {"type": "string"},
                             "slots": {
                                 "type": "object",
-                                "description": "Current known slot values; keys among: when, what, area, rooms, urgency, email.",
+                                "description": "Current known slot values; keys among: when, what, area, rooms, urgency, location.",
                             },
                         },
                         "required": ["companyId", "slots"],
+                    }
+                },
+            }
+        },
+        {
+            "toolSpec": {
+                "name": "check_availability",
+                "description": (
+                    "Ask the crew's Google Calendar for free time slots that fit the job. "
+                    "Call after you know the preferred date (WHEN) and have a rough job duration. "
+                    "Pass `date` as YYYY-MM-DD (single day) or 'YYYY-MM-DD..YYYY-MM-DD' for a range, "
+                    "and `durationMinutes` (use the price estimate's wallClockMinutes if you have it, "
+                    "otherwise 120). Returns up to `maxSlots` (default 3) free windows with ISO start/end "
+                    "and a `human` label you can read back to the caller."
+                ),
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "date": {
+                                "type": "string",
+                                "description": "YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD",
+                            },
+                            "durationMinutes": {"type": "integer"},
+                            "maxSlots": {"type": "integer", "default": 3},
+                        },
+                        "required": ["date", "durationMinutes"],
+                    }
+                },
+            }
+        },
+        {
+            "toolSpec": {
+                "name": "book_appointment",
+                "description": (
+                    "Create the calendar event. Call AFTER the caller has picked one of the "
+                    "slots returned by check_availability AND every required slot has been saved. "
+                    "Pass the exact `start` and `end` ISO strings from check_availability — do not invent times."
+                ),
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "start": {"type": "string", "description": "ISO 8601 with offset"},
+                            "end": {"type": "string", "description": "ISO 8601 with offset"},
+                            "summary": {"type": "string"},
+                            "location": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["start", "end", "summary"],
                     }
                 },
             }

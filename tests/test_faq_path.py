@@ -48,7 +48,7 @@ def test_is_question_negative_cases():
     # These are slot answers, not questions.
     assert not _is_question("tomorrow")
     assert not _is_question("office")
-    assert not _is_question("a. b. c. at gmail dot com")
+    assert not _is_question("Bahnhofstrasse 12, 8001 Zürich")
     assert not _is_question("85 square meters")
     assert not _is_question("five rooms")
     assert not _is_question("urgent please")
@@ -132,8 +132,8 @@ def test_handle_faq_turn_final_closes_after_questions_phase(monkeypatch):
     monkeypatch.delenv("DDB_BACKEND", raising=False)
     _stub_kb(monkeypatch)
     lex_slots = {
-        "email": {"value": {"originalValue": "How much per square meter?",
-                            "interpretedValue": "How much per square meter?"}},
+        "location": {"value": {"originalValue": "How much per square meter?",
+                               "interpretedValue": "How much per square meter?"}},
     }
     response = _handle_faq_turn(
         transcript="How much per square meter?",
@@ -160,7 +160,7 @@ def test_questions_prompt_appears_after_all_slots_filled(monkeypatch):
         for s, v in [
             ("when", "tomorrow"), ("what", "OFFICE_CLEANING"),
             ("area", "30 m2"), ("rooms", "3"), ("urgency", "high"),
-            ("email", "a@b.com"),
+            ("location", "Bahnhofstrasse 12, 8001 Zürich"),
         ]
     }
     event = {

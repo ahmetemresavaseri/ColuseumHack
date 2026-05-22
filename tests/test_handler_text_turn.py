@@ -22,7 +22,7 @@ def test_text_turn_emits_transcript_and_slots():
     handle_start_call(session, sink, company_name="Glanz AG", locale="de-CH")
     handle_text_turn(
         session,
-        "I need a move-out cleaning tomorrow for 85 m2, urgent, customer@example.com",
+        "I need a move-out cleaning tomorrow for 85 m2, urgent, Bahnhofstrasse 12, 8001 Zürich.",
         sink,
     )
     handle_end_call(session, sink, reason="completed")
@@ -39,18 +39,19 @@ def test_text_turn_emits_transcript_and_slots():
 
 
 def test_slot_adapter_returns_canonical_shape():
+    address = "Bahnhofstrasse 12, 8001 Zürich"
     result = slot_adapter.save_slot(
-        call_id="c1", booking_id="b1", slot="email", value="a@b.com"
+        call_id="c1", booking_id="b1", slot="location", value=address
     )
     assert result == {
         "callId": "c1",
         "bookingId": "b1",
-        "slot": "email",
-        "value": "a@b.com",
+        "slot": "location",
+        "value": address,
         "status": "saved",
         "backend": "mock",
     }
-    assert slot_adapter.snapshot("c1", "b1") == {"email": "a@b.com"}
+    assert slot_adapter.snapshot("c1", "b1") == {"location": address}
 
 
 def test_text_turn_does_not_re_emit_filled_slot():

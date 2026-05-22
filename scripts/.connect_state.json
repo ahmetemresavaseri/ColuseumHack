@@ -6,7 +6,7 @@
   "ContactFlowName": "atrium-inbound",
   "PhoneNumberId": "d2a4e97c-501c-4d5d-833a-2ab9778c6ffa",
   "PhoneNumberArn": "arn:aws:connect:us-west-2:160659473263:phone-number/d2a4e97c-501c-4d5d-833a-2ab9778c6ffa",
-  "PhoneNumber": "+15612820331",
+  "PhoneNumber": "+16122600610",
   "PhoneNumberType": "DID",
   "Region": "us-west-2",
   "AccountId": "160659473263",

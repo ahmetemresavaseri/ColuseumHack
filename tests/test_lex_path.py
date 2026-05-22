@@ -36,12 +36,12 @@ def _lex_event(
 def test_lex_first_turn_elicits_remaining_slot():
     response = handle_lex_event(
         _lex_event(
-            "I need a move-out cleaning tomorrow for 85 square meters, urgent, customer@example.com",
+            "I need a move-out cleaning tomorrow for 85 square meters, urgent, Bahnhofstrasse 12, 8001 Zürich.",
         ),
     )
     state = response["sessionState"]
     assert state["dialogAction"]["type"] == "ElicitSlot"
-    # 5 slots extracted (when, what, area, urgency, email) — only `rooms` remains.
+    # 5 slots extracted (when, what, area, urgency, location) — only `rooms` remains.
     assert state["dialogAction"]["slotToElicit"] == "rooms"
     assert state["sessionAttributes"]["callId"].startswith("call-")
     assert state["sessionAttributes"]["bookingId"].startswith("booking-")
@@ -53,7 +53,7 @@ def test_lex_completes_when_all_slots_filled():
     attrs: dict[str, str] = {}
     slots: dict = {}
     transcripts = [
-        "I need a move-out cleaning tomorrow for 85 m2, urgent, customer@example.com",
+        "I need a move-out cleaning tomorrow for 85 m2, urgent, Bahnhofstrasse 12, 8001 Zürich",
         "4 rooms",
         "no thanks",  # Reply to the post-slot "any questions?" prompt
     ]
@@ -73,7 +73,7 @@ def test_brain_skipped_when_not_configured(monkeypatch):
     monkeypatch.delenv("BRAIN_FUNCTION_NAME", raising=False)
     response = handle_lex_event(
         _lex_event(
-            "I need a move-out cleaning tomorrow for 85 square meters, urgent, customer@example.com",
+            "I need a move-out cleaning tomorrow for 85 square meters, urgent, Bahnhofstrasse 12, 8001 Zürich.",
         ),
     )
     # 5 slots filled; next ElicitSlot is rooms. No brainComputed flag yet

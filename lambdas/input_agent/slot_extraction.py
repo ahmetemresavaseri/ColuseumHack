@@ -68,7 +68,24 @@ WHEN_KEYWORDS = [
     "sunday",
 ]
 
-EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Swiss address: street + house number, then 4-digit PLZ (1000–9999) + city.
+# Examples it should match:
+#   "Bahnhofstrasse 12, 8001 Zürich"
+#   "Rue du Mont-Blanc 4, 1201 Genève"
+#   "I live at Limmatquai 50 8001 Zurich"
+# Street + city tokens must start with a capital letter (German/French/Italian
+# street names are always capitalised) — that anchors the start of each side
+# and stops the match from sucking in leading filler like "The address is".
+# Lowercase connectors ("du", "de", "la", "am", "von", "dei") are allowed in
+# the middle of a street name.
+_TOKEN = r"[A-ZÀ-ÝŽ][\w'-]*"
+_CONNECTOR = r"(?:du|de|des|del|della|la|le|les|am|im|von|zur|zum|sur|sous|dei|dell|all|alla|alle)"
+SWISS_ADDRESS_RE = re.compile(
+    rf"(?P<street>{_TOKEN}(?:[\s-](?:{_CONNECTOR}|{_TOKEN})){{0,4}})\s+"
+    r"(?P<number>\d{1,4}[a-zA-Z]?)\s*,?\s+"
+    r"(?P<plz>[1-9]\d{3})\s+"
+    rf"(?P<city>{_TOKEN}(?:[\s-]{_TOKEN}){{0,3}})",
+)
 AREA_RE = re.compile(
     r"(\d+(?:\.\d+)?)\s*(?:m2|m²|sqm|square\s*meters?|sq\s*ft|sqft|square\s*feet)",
     re.IGNORECASE,
@@ -128,14 +145,22 @@ def _parse_word_number(text: str) -> int | None:
     return total if found_any else None
 
 
-# Voice-spelled emails: "a. b. c. at gmail dot com" → "abc@gmail.com".
-# Captures repeated 1-2 char tokens (a, b, c) before "at", then "<word> dot
-# <word>" after. Best-effort; not robust against arbitrary spelling.
-VOICE_EMAIL_RE = re.compile(
-    r"\b([A-Za-z](?:\.\s*[A-Za-z])+)\s*\.?\s*(?:at|@)\s*([A-Za-z0-9]+)"
-    r"\s*(?:dot|\.)\s*([A-Za-z]{2,})\b",
-    re.IGNORECASE,
-)
+def extract_swiss_address(text: str) -> str | None:
+    """Best-effort: pull a normalized Swiss address out of free text.
+
+    Returns "<street> <number>, <plz> <city>" or None. Does not validate the
+    PLZ against the official Swiss Post list — only checks the 1000–9999 range.
+    """
+    match = SWISS_ADDRESS_RE.search(text)
+    if not match:
+        return None
+    street = " ".join(match.group("street").split()).strip(" ,.")
+    number = match.group("number").strip()
+    plz = match.group("plz")
+    city = " ".join(match.group("city").split()).strip(" ,.")
+    if not street or not city:
+        return None
+    return f"{street} {number}, {plz} {city}"
 
 
 def extract_slots_deterministic(text: str, state: SlotState | None = None) -> list[SlotPair]:
@@ -198,17 +223,10 @@ def extract_slots_deterministic(text: str, state: SlotState | None = None) -> li
                 found.append(("urgency", label))
                 break
 
-    if not state.email:
-        match = EMAIL_RE.search(text)
-        if match:
-            found.append(("email", match.group(0)))
-        else:
-            voice = VOICE_EMAIL_RE.search(text)
-            if voice:
-                local = re.sub(r"[\s.]", "", voice.group(1)).lower()
-                domain = voice.group(2).lower()
-                tld = voice.group(3).lower()
-                found.append(("email", f"{local}@{domain}.{tld}"))
+    if not state.location:
+        address = extract_swiss_address(text)
+        if address:
+            found.append(("location", address))
 
     # Bare-number utterances ("thirty", "5") are intentionally NOT handled
     # here — they're context-dependent (caller's "thirty" could be area OR

@@ -6,7 +6,7 @@ const labels: Record<keyof SlotMap, string> = {
   area: "Area",
   rooms: "Rooms",
   urgency: "Urgency",
-  email: "Email",
+  location: "Location",
 };
 
 export function SlotsPane({ slots }: { slots: SlotMap }) {

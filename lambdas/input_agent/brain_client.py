@@ -121,6 +121,10 @@ def _inject_context(
         args.setdefault("bookingId", booking_id)
     if tool_name in {"kb_lookup", "compute_price"}:
         args.setdefault("companyId", company_id)
+    if tool_name in {"check_availability", "book_appointment"}:
+        cal_id = os.environ.get("GOOGLE_CALENDAR_ID")
+        if cal_id:
+            args.setdefault("calendarId", cal_id)
     return args
 
 

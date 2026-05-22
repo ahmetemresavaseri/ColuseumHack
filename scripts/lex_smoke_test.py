@@ -41,7 +41,7 @@ def main() -> int:
         "Hi, I need a move-out cleaning",
         "It is around eighty square metres, two bedrooms",
         "Next Friday morning would work",
-        "Urgency is low, my email is test at example dot com",
+        "Urgency is low, the address is Bahnhofstrasse twelve, eight thousand one Zurich",
     ]
 
     for i, text in enumerate(utterances, 1):
