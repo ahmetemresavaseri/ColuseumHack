@@ -38,6 +38,7 @@ import ddb
 import events as wall_events
 import lex_v2
 from bedrock_client import BedrockClaudeClient
+from kb import ANSWER_MIN_SCORE, kb_lookup
 from polly_client import PollyClient
 from session import CallSession, drop_session, get_session, new_session
 from tool_dispatcher import dispatch_tool
@@ -132,6 +133,23 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
         intent = _promote_to_collect_booking(event) or intent
     lex_slots: dict[str, Any] = dict(intent.get("slots") or {})
 
+    transcript = lex_v2.get_input_transcript(event)
+
+    # Phase 3 RAG: if the caller asked a question mid-elicitation, answer it
+    # from the tenant KB BEFORE the slot pipeline can mistake it for slot
+    # input. Return early so we don't pollute the booking with the question.
+    if transcript and _is_question(transcript):
+        return _handle_faq_turn(
+            transcript=transcript,
+            event=event,
+            intent=intent,
+            lex_slots=lex_slots,
+            attrs=attrs,
+            call_id=call_id,
+            booking_id=booking_id,
+            company_id=company_id,
+        )
+
     # Lex's built-in slot elicitation stores the *whole caller utterance* as
     # the slot value (because we use AMAZON.FreeFormInput). Run each captured
     # value back through our deterministic extractor so e.g.
@@ -146,7 +164,6 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
         )
     state = _state_from_lex_slots(lex_slots)
 
-    transcript = lex_v2.get_input_transcript(event)
     if transcript:
         pairs = extract_slots_deterministic(transcript, state)
         accepted = apply_extractions(state, pairs)
@@ -230,11 +247,16 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     )
 
 
-def _log_agent_turn(call_id: str, company_id: str, text: str) -> None:
+def _log_agent_turn(
+    call_id: str,
+    company_id: str,
+    text: str,
+    citations: list[dict[str, Any]] | None = None,
+) -> None:
     """Write the Lambda's spoken response to `Calls#turn#NNNNNN` so the wall
-    shows both sides of the conversation. Lex's built-in TTS reads this
-    message out loud — logging it from the Lambda is the only way the wall
-    sees the agent's side of the transcript.
+    shows both sides of the conversation. When `citations` is supplied, the
+    stream fan-out turns each one into a `CitationAdded` wall event — this
+    is how Phase 3's RAG answers light up the wall's Citations pane.
     """
     if not USE_REAL_DDB or not text:
         return
@@ -247,9 +269,165 @@ def _log_agent_turn(call_id: str, company_id: str, text: str) -> None:
             "Agent",
             text,
             company_id=meta.get("companyId") or company_id,
+            citations=citations or None,
         )
     except Exception as exc:  # pragma: no cover
         logger.warning("agent turn log failed: %s", exc)
+
+
+def _log_caller_turn(call_id: str, company_id: str, text: str) -> None:
+    if not USE_REAL_DDB or not text:
+        return
+    try:
+        meta = ddb.get_call_meta(call_id)
+        seq = int(meta.get("turnSeq") or 0) + 1
+        ddb.append_turn(
+            call_id, seq, "Caller", text,
+            company_id=meta.get("companyId") or company_id,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("caller turn log failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 RAG helpers
+# ---------------------------------------------------------------------------
+
+import re as _re_q
+
+_QUESTION_VOCAB = {
+    "how much", "how many", "how long", "price", "cost", "rate",
+    "include", "covered", "cover", "policy", "weekend", "evening",
+    "hours", "guarantee", "cancel", "photos", "needed", "service",
+    "do you", "can you", "does it", "is it",
+}
+_QUESTION_FIRST_TOKENS = {
+    "how", "what", "when", "where", "why", "who",
+    "do", "does", "did", "can", "could", "will", "would", "should",
+    "is", "are", "was", "were",
+}
+
+
+def _is_question(text: str) -> bool:
+    """Heuristic: distinguish FAQ-style queries from slot answers."""
+    if not text:
+        return False
+    s = text.strip()
+    if s.endswith("?"):
+        return True
+    tokens = s.lower().split()
+    if not tokens:
+        return False
+    first = tokens[0].rstrip(".,!?")
+    if first not in _QUESTION_FIRST_TOKENS:
+        return False
+    lowered = s.lower()
+    if any(v in lowered for v in _QUESTION_VOCAB):
+        return True
+    # Generic safety net: longer WH-led utterances are usually questions, but
+    # short bare answers ("how many" wouldn't be a caller turn — that's the
+    # agent's prompt) are not.
+    return len(tokens) >= 4
+
+
+def _just_elicited_slot(lex_slots: dict[str, Any], transcript: str) -> str | None:
+    """Find the slot whose originalValue equals the caller's transcript — that's
+    what Lex was eliciting this turn."""
+    needle = (transcript or "").strip()
+    for slot, payload in lex_slots.items():
+        if not isinstance(payload, dict):
+            continue
+        raw = ((payload.get("value") or {}).get("originalValue") or "").strip()
+        if raw == needle:
+            return slot
+    return None
+
+
+def _compose_faq_answer(
+    kb_result: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Turn a KB lookup result into a spoken answer + citations.
+
+    Refusal policy: if KB has no entries or the top score is below
+    `ANSWER_MIN_SCORE`, return a refusal and NO citations — the wall stays
+    clean and the agent doesn't invent.
+    """
+    status = kb_result.get("status")
+    top_score = int(kb_result.get("top_score") or 0)
+    citations = kb_result.get("citations") or []
+    if status != "ok" or top_score < ANSWER_MIN_SCORE or not citations:
+        return ("I don't have that information.", [])
+    top = citations[0]
+    body = (top.get("excerpt") or "").rstrip(". ").strip()
+    if not body:
+        return ("I don't have that information.", [])
+    # Lead with the topic so the spoken answer feels like an answer ("Window
+    # cleaning. Interior, frames, sills…"), not just a continuation.
+    title = _extract_title_from_source(top.get("source", ""))
+    if title and title.lower() not in body.lower()[:60]:
+        return (f"{title}. {body}.", citations[:2])
+    return (f"{body}.", citations[:2])
+
+
+def _extract_title_from_source(source: str) -> str:
+    # `_citation_source` format is "CATEGORY · Title"; strip the category prefix.
+    parts = source.split("·", 1)
+    return parts[-1].strip()
+
+
+def _handle_faq_turn(
+    *,
+    transcript: str,
+    event: dict[str, Any],
+    intent: dict[str, Any],
+    lex_slots: dict[str, Any],
+    attrs: dict[str, str],
+    call_id: str,
+    booking_id: str,
+    company_id: str,
+) -> dict[str, Any]:
+    """Answer a caller question from KB, then re-elicit the slot Lex was
+    asking about so the booking flow resumes."""
+    # Don't let Lex's auto-capture of the question pollute the slot.
+    elicited = _just_elicited_slot(lex_slots, transcript)
+    if elicited:
+        lex_slots.pop(elicited, None)
+
+    _log_caller_turn(call_id, company_id, transcript)
+
+    kb_result = kb_lookup(transcript, company_id, top_k=3)
+    answer, citations = _compose_faq_answer(kb_result)
+
+    state = _state_from_lex_slots(lex_slots)
+    next_slot = next(
+        (s for s in lex_v2.REQUIRED_SLOT_ORDER if not _slot_filled(state, s)),
+        None,
+    )
+    slot_to_elicit = elicited or next_slot
+
+    if slot_to_elicit and slot_to_elicit in lex_v2.PROMPTS:
+        response_text = f"{answer} {lex_v2.PROMPTS[slot_to_elicit]}"
+    else:
+        response_text = answer
+
+    _log_agent_turn(call_id, company_id, response_text, citations=citations)
+
+    attrs["callId"] = call_id
+    attrs["bookingId"] = booking_id
+    attrs["companyId"] = company_id
+
+    if slot_to_elicit:
+        return lex_v2.elicit_slot(
+            slot_to_elicit, response_text,
+            session_attributes=attrs,
+            intent_name=intent.get("name", lex_v2.INTENT_NAME),
+            intent_slots=lex_slots,
+        )
+    return lex_v2.close_session(
+        response_text,
+        session_attributes=attrs,
+        intent_name=intent.get("name", lex_v2.INTENT_NAME),
+    )
 
 
 def _to_lex_slot_value(value: Any) -> dict[str, Any]:

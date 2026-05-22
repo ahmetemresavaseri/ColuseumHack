@@ -179,21 +179,85 @@ Success criteria:
 
 ### Phase 3: RAG grounding
 
-Goal: company-specific questions are answered from tenant content.
+Goal: company-specific questions are answered from tenant content, visibly
+grounded on the Live Call Wall, and refused when the tenant content does not
+support an answer.
+
+Demo behavior contract:
+
+```text
+Caller asks a company/policy/pricing question
+  -> Input Agent classifies the turn as `faq_question`
+  -> kb_lookup(question, companyId) retrieves tenant-scoped context
+  -> agent answers in 1-2 short spoken sentences using only retrieved context
+  -> citations are persisted with the agent turn or emitted as CitationAdded
+  -> Live Call Wall shows the source + excerpt
+
+If no useful tenant context is returned
+  -> agent says it does not have that information
+  -> no invented price, policy, service, or guarantee is spoken
+```
+
+Questions that should trigger `kb_lookup` during the live call:
+
+- Pricing or rate questions: "How much is window cleaning per square meter?"
+- Service inclusion questions: "Is handover-ready move-out cleaning included?"
+- Scheduling policy questions: "Do you clean offices on weekends or evenings?"
+- Photo/review questions: "Do you need pictures before confirming?"
+- Service-area questions: "Do you cover this postcode?"
+- Cancellation, guarantee, or tenant-policy questions.
+
+Questions that should be refused unless the KB explicitly supports them:
+
+- Services outside the catalog, such as car washing or appliance repair.
+- Legal, medical, payment-card, or unrelated personal questions.
+- Exact final quote commitments beyond the Brain estimate.
 
 Implement:
 
-1. Upload `faq.md`, `pricelist.md`, and `service_catalog.md` to the KB bucket.
+1. Seed tenant knowledge with enough demo coverage:
+   - `faq.md`
+   - `pricelist.md`
+   - `service_catalog.md`
+   - `infrastructure/seed/knowledge_items.json` as the demo-safe fallback.
 2. Configure Bedrock KB metadata with `companyId`.
 3. Complete `kb_lookup` tenant filtering.
-4. Surface citations on the Live Call Wall.
-5. Add eval cases in `eval/rag_eval.csv` and `eval/hallucination_test.md`.
+4. Keep a deterministic DynamoDB-backed `KnowledgeItems` lookup available for
+   demo reliability if Bedrock KB setup or ingestion is flaky.
+5. Add FAQ intent detection in the live turn path so the agent knows when to
+   call `kb_lookup` instead of treating the utterance only as slot input.
+6. Add an answer policy:
+   - use only retrieved tenant context;
+   - keep spoken answers short;
+   - if retrieval is empty or low confidence, say "I don't have that
+     information";
+   - never invent prices, availability, guarantees, or service coverage.
+7. Persist citations with the corresponding agent answer turn or emit
+   `CitationAdded` events directly.
+8. Surface citations on the Live Call Wall with a readable source label and
+   short excerpt.
+9. Add eval cases in `eval/rag_eval.csv` and `eval/hallucination_test.md`.
+
+Demo script:
+
+1. Caller asks: "How much is window cleaning per square meter?"
+   - Expected: answer from pricelist/service content, citation appears.
+2. Caller asks: "Is move-out cleaning handover-ready?"
+   - Expected: answer from service catalog, citation appears.
+3. Caller asks: "Can you clean offices on weekends?"
+   - Expected: answer from FAQ/scheduling content, citation appears.
+4. Caller asks: "Do you also wash cars?"
+   - Expected: refusal: "I don't have that information."
 
 Success criteria:
 
-- FAQ answers include citations.
+- FAQ questions trigger `kb_lookup` during the real or fallback live call path.
+- In-scope FAQ answers are spoken from retrieved tenant context only.
+- Citations appear on the Live Call Wall within the same demo beat as the
+  answer.
 - Out-of-scope questions are refused instead of hallucinated.
-- RAG eval has at least 5 passing cases.
+- RAG eval has at least 8 passing in-scope cases.
+- Hallucination eval has 5/5 passing out-of-scope refusals.
 
 ### Phase 4: Calendar and booking creation
 

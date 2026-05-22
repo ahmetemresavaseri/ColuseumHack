@@ -4,7 +4,7 @@
     "itemId": "faq#office-hours",
     "category": "faq",
     "topic": "office cleaning hours",
-    "keywords": ["office", "hours", "evening", "weekend", "schedule"],
+    "keywords": ["office", "hours", "evening", "weekend", "schedule", "outside"],
     "title": "Do you clean offices outside normal hours?",
     "body": "Yes. Office cleaning can be scheduled early morning, evening, or weekend, depending on crew availability."
   },
@@ -13,7 +13,7 @@
     "itemId": "faq#price-during-call",
     "category": "faq",
     "topic": "price estimate on call",
-    "keywords": ["price", "estimate", "quote", "cost", "ballpark"],
+    "keywords": ["price", "estimate", "quote", "ballpark", "during"],
     "title": "Can you provide a price during the call?",
     "body": "Yes. Atrium can provide a ballpark estimate once service type, area, room count, urgency, and timing are known."
   },
@@ -22,7 +22,7 @@
     "itemId": "faq#photos-needed",
     "category": "faq",
     "topic": "photos requirement",
-    "keywords": ["photos", "pictures", "construction", "windows"],
+    "keywords": ["photos", "photo", "pictures", "needed", "need", "require"],
     "title": "Do you need photos?",
     "body": "For complex construction cleaning or unusual window jobs, photos may be requested after the call before a final quote is confirmed."
   },
@@ -32,9 +32,9 @@
     "category": "service",
     "topic": "move-out cleaning",
     "serviceType": "MOVE_OUT_CLEANING",
-    "keywords": ["move-out", "move out", "handover", "endreinigung", "auszug"],
+    "keywords": ["move-out", "move out", "moveout", "handover", "endreinigung", "auszug", "tenancy"],
     "title": "Move-out cleaning",
-    "body": "Kitchen, bathrooms, floors, inside cupboards, fixtures, and handover-ready final cleaning."
+    "body": "Move-out cleaning includes kitchen, bathrooms, floors, inside cupboards, fixtures, and handover-ready final cleaning."
   },
   {
     "companyId": "glanz-ag",
@@ -42,9 +42,9 @@
     "category": "service",
     "topic": "office cleaning",
     "serviceType": "OFFICE_CLEANING",
-    "keywords": ["office", "workstations", "büro", "buero"],
+    "keywords": ["office", "workstations", "büro", "buero", "workplace"],
     "title": "Office cleaning",
-    "body": "Workstations, floors, bins, kitchenette, bathrooms, and shared areas."
+    "body": "Office cleaning covers workstations, floors, bins, kitchenette, bathrooms, and shared areas."
   },
   {
     "companyId": "glanz-ag",
@@ -52,9 +52,9 @@
     "category": "service",
     "topic": "window cleaning",
     "serviceType": "WINDOW_CLEANING",
-    "keywords": ["window", "windows", "fenster", "glass"],
+    "keywords": ["fenster", "glass", "interior", "exterior", "inside", "outside"],
     "title": "Window cleaning",
-    "body": "Interior window cleaning, frames, sills, and accessible exterior windows."
+    "body": "Window cleaning covers interior glass, frames, sills, and accessible exterior windows."
   },
   {
     "companyId": "glanz-ag",
@@ -62,18 +62,18 @@
     "category": "service",
     "topic": "construction cleaning",
     "serviceType": "CONSTRUCTION_CLEANING",
-    "keywords": ["construction", "renovation", "post-renovation", "bau", "baureinigung", "umbau"],
+    "keywords": ["renovation", "post-renovation", "bau", "baureinigung", "umbau", "debris"],
     "title": "Construction cleaning",
-    "body": "Post-renovation dust removal, floor cleaning, debris-ready surface preparation, and final cleaning before handover."
+    "body": "Construction cleaning includes post-renovation dust removal, floor cleaning, debris-ready surface preparation, and final cleaning before handover."
   },
   {
     "companyId": "glanz-ag",
     "itemId": "pricing#summary",
     "category": "pricing",
-    "topic": "pricelist summary",
+    "topic": "pricelist rates per square meter",
     "currency": "CHF",
-    "keywords": ["price", "pricelist", "cost", "rate", "fee", "preis"],
+    "keywords": ["pricelist", "rate", "rates", "fee", "base", "much", "many", "per", "square", "meter", "francs", "chf", "multiplier", "urgent", "preis"],
     "title": "Glanz AG pricelist (CHF)",
-    "body": "Move-out cleaning: base 120, 4.50/m2, room surcharge applies. Office cleaning: base 90, 3.20/m2, recurring plans available. Window cleaning: base 80, 5.00/m2, exterior access may require review. Urgent jobs may apply a 20-25% multiplier."
+    "body": "Move-out: base 120 plus 4.50 per square meter. Office: base 90 plus 3.20 per square meter. Window: base 80 plus 5.00 per square meter, exterior may need review. Urgent jobs apply a 20 to 25 percent multiplier."
   }
 ]
