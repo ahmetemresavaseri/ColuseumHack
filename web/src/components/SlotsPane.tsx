@@ -8,7 +8,7 @@ const labels: Record<keyof SlotMap, string> = {
   area: "Area",
   rooms: "Rooms",
   urgency: "Urgency",
-  location: "Location",
+  location: "Additional information",
 };
 
 // Backend stores some slot values as ENUMs (e.g. MOVE_OUT_CLEANING).
