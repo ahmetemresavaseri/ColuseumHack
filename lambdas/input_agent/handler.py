@@ -135,9 +135,26 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
 
     transcript = lex_v2.get_input_transcript(event)
 
-    # If the prior turn asked "any questions?" (post-slot-collection beat),
-    # interpret this turn against the questions phase rather than slot input.
-    if attrs.get("questionsPrompted") == "1":
+    # Conversation phases (sessionAttribute "phase"):
+    #   collecting       — eliciting the 5 booking slots
+    #   estimate_spoken  — Brain quote spoken; caller can react / ask
+    #   asking_email     — collecting the confirmation email
+    #   any_questions    — final "anything else?" beat before goodbye
+    #
+    # Each phase has different rules for routing the caller's reply:
+    # `estimate_spoken` and `any_questions` intercept the reply BEFORE the
+    # slot pipeline runs, so the reply doesn't pollute the email transport
+    # slot Lex is technically eliciting.
+    phase = attrs.get("phase", "collecting")
+
+    if phase == "estimate_spoken":
+        return _react_to_estimate(
+            transcript=transcript, event=event, intent=intent,
+            lex_slots=lex_slots, attrs=attrs,
+            call_id=call_id, booking_id=booking_id, company_id=company_id,
+        )
+
+    if phase == "any_questions":
         if transcript and _is_question(transcript):
             return _handle_faq_turn(
                 transcript=transcript, event=event, intent=intent,
@@ -145,17 +162,15 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
                 call_id=call_id, booking_id=booking_id, company_id=company_id,
                 final=True,
             )
-        # "no thanks" / silence / anything else — close cleanly.
         return _finalize_after_questions(
             transcript=transcript, event=event, intent=intent,
             lex_slots=lex_slots, attrs=attrs,
             call_id=call_id, booking_id=booking_id, company_id=company_id,
         )
 
-    # Phase 3 RAG: if the caller asked a question mid-elicitation, answer it
-    # from the tenant KB BEFORE the slot pipeline can mistake it for slot
-    # input. Return early so we don't pollute the booking with the question.
-    if transcript and _is_question(transcript):
+    # Phase 3 RAG: if caller asks a question DURING slot collection, answer
+    # from KB before the slot pipeline mistakes it for slot input.
+    if phase == "collecting" and transcript and _is_question(transcript):
         return _handle_faq_turn(
             transcript=transcript,
             event=event,
@@ -226,67 +241,63 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     attrs["bookingId"] = booking_id
     attrs["companyId"] = company_id
 
-    # Brain mid-call: once `what` + `area` are known, invoke the Brain Lambda
-    # for a live price estimate. The Wall picks the result up via the
-    # `Bookings#current.brain` → DDB Streams → `BrainEstimate` event chain.
-    # Skip if we already computed it this session (sessionAttribute pin).
-    if (
-        USE_REAL_DDB
-        and state.what
-        and state.area is not None
-        and attrs.get("brainComputed") != "1"
-    ):
-        try:
-            _maybe_compute_brain(
-                call_id=call_id,
-                booking_id=booking_id,
-                company_id=company_id,
-                state=state,
-            )
-            attrs["brainComputed"] = "1"
-        except Exception as exc:  # pragma: no cover - depends on AWS env
-            logger.warning("compute_price failed: %s", exc)
-
-    next_slot = next(
-        (s for s in lex_v2.REQUIRED_SLOT_ORDER if not _slot_filled(state, s)),
-        None,
-    )
-
-    if next_slot is None or lex_v2.get_invocation_source(event) == "FulfillmentCodeHook":
-        # Once: give the caller a chance to ask anything before we close.
-        # The next turn's transcript either trips our FAQ branch (handled at
-        # the top of this function and returns a Close) or is treated as
-        # "no thanks" and we close here on the second pass.
-        if attrs.get("questionsPrompted") != "1":
-            attrs["questionsPrompted"] = "1"
+    # Phase = "asking_email": if the caller just gave us their email, advance.
+    if phase == "asking_email":
+        if _slot_filled(state, "email"):
+            attrs["phase"] = "any_questions"
             prompt = (
                 "Before we wrap up — do you have any questions about our "
                 "services, pricing, or scheduling?"
             )
             _log_agent_turn(call_id, company_id, prompt)
             return lex_v2.elicit_slot(
-                # Re-elicit the last filled slot purely as a transport for the
-                # prompt; the caller's reply is intercepted next turn.
-                "email",
-                prompt,
+                "email", prompt,
                 session_attributes=attrs,
                 intent_name=intent.get("name", lex_v2.INTENT_NAME),
                 intent_slots=lex_slots,
             )
-
-        # Read back the brain estimate (computed mid-call) so we can speak
-        # the price + feasibility before hanging up.
-        close_message = _compose_close_message(booking_id, state)
-        _log_agent_turn(call_id, company_id, close_message)
-        if USE_REAL_DDB:
-            try:
-                ddb.end_call(call_id, booking_id, reason="completed")
-            except Exception as exc:  # pragma: no cover
-                logger.warning("end_call failed: %s", exc)
-        return lex_v2.close_session(
-            close_message,
+        prompt = (
+            "Sorry, I didn't catch that. What email address should I send "
+            "the confirmation to?"
+        )
+        _log_agent_turn(call_id, company_id, prompt)
+        return lex_v2.elicit_slot(
+            "email", prompt,
             session_attributes=attrs,
             intent_name=intent.get("name", lex_v2.INTENT_NAME),
+            intent_slots=lex_slots,
+        )
+
+    # Phase = "collecting": elicit the next of the 5 booking slots OR, when
+    # all 5 are filled, compute the Brain estimate and speak it.
+    booking_slot_order = ("when", "what", "area", "rooms", "urgency")
+    next_slot = next(
+        (s for s in booking_slot_order if not _slot_filled(state, s)),
+        None,
+    )
+
+    if next_slot is None:
+        # All 5 collected. Compute brain (once), speak the estimate, advance.
+        if USE_REAL_DDB and attrs.get("brainComputed") != "1":
+            try:
+                _maybe_compute_brain(
+                    call_id=call_id,
+                    booking_id=booking_id,
+                    company_id=company_id,
+                    state=state,
+                )
+                attrs["brainComputed"] = "1"
+            except Exception as exc:  # pragma: no cover
+                logger.warning("compute_price failed: %s", exc)
+        estimate_text = _compose_estimate_speech(booking_id, state)
+        prompt = f"{estimate_text} Does that work for you?"
+        attrs["phase"] = "estimate_spoken"
+        _log_agent_turn(call_id, company_id, prompt)
+        return lex_v2.elicit_slot(
+            "email", prompt,
+            session_attributes=attrs,
+            intent_name=intent.get("name", lex_v2.INTENT_NAME),
+            intent_slots=lex_slots,
         )
 
     prompt = lex_v2.PROMPTS[next_slot]
@@ -352,34 +363,49 @@ _QUESTION_VOCAB = {
     "how much", "how many", "how long", "price", "cost", "rate",
     "include", "covered", "cover", "policy", "weekend", "evening",
     "hours", "guarantee", "cancel", "photos", "needed", "service",
-    "do you", "can you", "does it", "is it",
+    "do you", "can you", "does it", "is it", "are you",
 }
 _QUESTION_FIRST_TOKENS = {
     "how", "what", "when", "where", "why", "who",
     "do", "does", "did", "can", "could", "will", "would", "should",
     "is", "are", "was", "were",
 }
+# Filler stutters ASR commonly inserts before the real utterance.
+_FILLER_PREFIXES = {
+    "i'm", "im", "uh", "um", "err", "well", "so", "like", "okay", "ok",
+    "yeah", "yes", "no",
+}
 
 
 def _is_question(text: str) -> bool:
-    """Heuristic: distinguish FAQ-style queries from slot answers."""
+    """Heuristic: distinguish FAQ-style queries from slot answers.
+
+    Robust to ASR filler prefixes like "i'm do you clean offices on the
+    weekend" — strip a small set of well-known fillers from the start
+    before checking the question vocabulary.
+    """
     if not text:
         return False
     s = text.strip()
     if s.endswith("?"):
         return True
-    tokens = s.lower().split()
+    tokens = [t.rstrip(".,!?") for t in s.lower().split()]
     if not tokens:
         return False
-    first = tokens[0].rstrip(".,!?")
-    if first not in _QUESTION_FIRST_TOKENS:
+    # Drop leading fillers ("i'm", "uh", "okay") so the real question token
+    # ("do you ...") becomes the first.
+    while tokens and tokens[0] in _FILLER_PREFIXES:
+        tokens.pop(0)
+    if not tokens:
         return False
-    lowered = s.lower()
+    first = tokens[0]
+    lowered = " ".join(tokens)
+    # Strong signal: any question vocab anywhere in the utterance.
     if any(v in lowered for v in _QUESTION_VOCAB):
         return True
-    # Generic safety net: longer WH-led utterances are usually questions, but
-    # short bare answers ("how many" wouldn't be a caller turn — that's the
-    # agent's prompt) are not.
+    if first not in _QUESTION_FIRST_TOKENS:
+        return False
+    # Generic safety net: longer WH-led utterances are usually questions.
     return len(tokens) >= 4
 
 
@@ -503,6 +529,70 @@ def _handle_faq_turn(
         response_text,
         session_attributes=attrs,
         intent_name=intent.get("name", lex_v2.INTENT_NAME),
+    )
+
+
+def _react_to_estimate(
+    *,
+    transcript: str,
+    event: dict[str, Any],
+    intent: dict[str, Any],
+    lex_slots: dict[str, Any],
+    attrs: dict[str, str],
+    call_id: str,
+    booking_id: str,
+    company_id: str,
+) -> dict[str, Any]:
+    """Caller's first turn after we spoke the estimate.
+
+    Their reply is either a reaction ("okay", "sounds good") or a question
+    about the price/service. Either way, acknowledge and ask for their
+    confirmation email next. We pop the just-captured email-transport slot
+    so the reaction text doesn't pollute the real email value.
+    """
+    elicited = _just_elicited_slot(lex_slots, transcript) if transcript else None
+    if elicited:
+        lex_slots.pop(elicited, None)
+
+    if transcript:
+        _log_caller_turn(call_id, company_id, transcript)
+
+    state = _state_from_lex_slots(lex_slots)
+
+    citations: list[dict[str, Any]] = []
+    answer_prefix = ""
+    if transcript and _is_question(transcript):
+        kb_result = kb_lookup(transcript, company_id, top_k=3)
+        answer, citations = _compose_faq_answer(kb_result)
+        answer_prefix = f"{answer} "
+
+    # Skip the redundant email ask if the caller already gave one during slot
+    # collection — go straight to the closing "any questions?" beat.
+    if _slot_filled(state, "email"):
+        attrs["phase"] = "any_questions"
+        prompt = (
+            f"{answer_prefix}Before we wrap up — do you have any questions "
+            "about our services, pricing, or scheduling?"
+        )
+    else:
+        attrs["phase"] = "asking_email"
+        prompt = (
+            f"{answer_prefix}What email address should I send the "
+            "confirmation to?"
+        )
+
+    attrs["callId"] = call_id
+    attrs["bookingId"] = booking_id
+    attrs["companyId"] = company_id
+    _log_agent_turn(
+        call_id, company_id, prompt,
+        citations=citations or None,
+    )
+    return lex_v2.elicit_slot(
+        "email", prompt,
+        session_attributes=attrs,
+        intent_name=intent.get("name", lex_v2.INTENT_NAME),
+        intent_slots=lex_slots,
     )
 
 
@@ -644,6 +734,9 @@ def _bare_number_fallback(slot: str, raw: str) -> Any | None:
         return n
     if slot == "when":
         cleaned = raw.strip().rstrip(".").strip()
+        # ASR often prepends a lone single letter ("a in three days") — drop it.
+        import re as _re
+        cleaned = _re.sub(r"^\s*[a-zA-Z]\.?\s+", "", cleaned).strip()
         if 0 < len(cleaned) <= 60:
             return cleaned
     return None
@@ -684,15 +777,19 @@ _CURRENCY_SPOKEN = {
 }
 
 
-def _compose_close_message(booking_id: str, state: SlotState) -> str:
-    """Speak the price + feasibility back to the caller before hanging up."""
-    fallback = "All set — I have everything I need. Thanks for calling. Goodbye!"
+def _compose_estimate_speech(booking_id: str, state: SlotState) -> str:
+    """Speak the price + feasibility note (no goodbye, no email mention).
+
+    Used at the end of the `collecting` phase to read the Brain quote back
+    to the caller before we ask for their email.
+    """
+    fallback = "Got everything I need to put together an estimate."
     if not USE_REAL_DDB:
         return fallback
     try:
         booking = ddb.get_booking(booking_id) or {}
     except Exception as exc:  # pragma: no cover
-        logger.warning("close: get_booking failed: %s", exc)
+        logger.warning("estimate: get_booking failed: %s", exc)
         return fallback
 
     brain = booking.get("brain") or {}
@@ -701,7 +798,9 @@ def _compose_close_message(booking_id: str, state: SlotState) -> str:
         return fallback
 
     service = _SERVICE_SPOKEN.get(brain.get("serviceType", ""), "your cleaning")
-    currency = _CURRENCY_SPOKEN.get(str(brain.get("currency", "")), str(brain.get("currency", "")))
+    currency = _CURRENCY_SPOKEN.get(
+        str(brain.get("currency", "")), str(brain.get("currency", ""))
+    )
     try:
         price_str = f"{float(price):.0f}"
     except (TypeError, ValueError):
@@ -713,20 +812,21 @@ def _compose_close_message(booking_id: str, state: SlotState) -> str:
     reasons = feasibility.get("reasons") or []
     if status == "needs_review":
         if "photos_required" in reasons:
-            parts.append("We'll send a short email asking for a couple of photos before we confirm.")
+            parts.append("We may ask for a couple of photos before we confirm.")
         elif "no_crew_assigned" in reasons:
-            parts.append("Someone from our team will reach out shortly to confirm a crew.")
+            parts.append("Someone from our team will follow up to confirm a crew.")
         elif "large_area" in reasons or "large_rooms" in reasons or "over_capacity" in reasons:
-            parts.append("Because of the size, our team will follow up to confirm the final quote.")
+            parts.append("Because of the size, our team will confirm the final quote.")
         else:
-            parts.append("Our team will follow up to confirm the booking shortly.")
+            parts.append("Our team will follow up to confirm the booking.")
     elif status == "unsupported":
-        parts = ["I'm sorry, that service isn't one we offer right now. Our team will be in touch."]
-    else:
-        parts.append("We'll send a confirmation to your email. Thanks for calling Glanz AG. Goodbye!")
-        return " ".join(parts)
-    parts.append("Goodbye!")
+        return "I'm sorry, that service isn't one we offer right now. Our team will be in touch."
     return " ".join(parts)
+
+
+def _compose_close_message(booking_id: str, state: SlotState) -> str:
+    """Goodbye line — price was already spoken in the estimate phase."""
+    return "We'll send a confirmation to your email. Thanks for calling Glanz AG. Goodbye!"
 
 
 def _maybe_compute_brain(

@@ -50,18 +50,26 @@ def test_lex_first_turn_elicits_remaining_slot():
 
 
 def test_lex_completes_when_all_slots_filled():
+    """End-to-end flow: collect, estimate, react, any-questions, close."""
     attrs: dict[str, str] = {}
     slots: dict = {}
     transcripts = [
         "I need a move-out cleaning tomorrow for 85 m2, urgent, customer@example.com",
-        "4 rooms",
-        "no thanks",  # Reply to the post-slot "any questions?" prompt
+        "4 rooms",   # fills last booking slot -> handler speaks estimate
+        "okay",      # react_to_estimate -> email already filled, skips to any_questions
+        "no thanks", # answer to "any questions?" -> close
     ]
+    phases = []
     for transcript in transcripts:
         response = handle_lex_event(_lex_event(transcript, attrs, slots))
         attrs = response["sessionState"]["sessionAttributes"]
         slots = response["sessionState"]["intent"].get("slots") or {}
+        phases.append(attrs.get("phase"))
     state = response["sessionState"]
+    # First turn doesn't set phase explicitly (defaults to collecting); then
+    # estimate_spoken after rooms fills, then any_questions twice (the
+    # react-skip-to-questions path and the close response).
+    assert phases == [None, "estimate_spoken", "any_questions", "any_questions"]
     assert state["dialogAction"]["type"] == "Close"
     assert state["intent"]["state"] == "Fulfilled"
 

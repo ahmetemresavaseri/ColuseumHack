@@ -148,19 +148,18 @@ def test_handle_faq_turn_final_closes_after_questions_phase(monkeypatch):
     assert response["sessionState"]["intent"]["state"] == "Fulfilled"
 
 
-def test_questions_prompt_appears_after_all_slots_filled(monkeypatch):
-    """On the turn after the last slot is captured, the handler should ask
-    'any questions?' before closing."""
+def test_estimate_phase_spoken_after_5_booking_slots(monkeypatch):
+    """When the 5 booking slots are all filled, the handler should compute the
+    estimate, speak it, and advance to phase=estimate_spoken (NOT jump
+    straight to "any questions?")."""
     from handler import handle_lex_event
     monkeypatch.delenv("DDB_BACKEND", raising=False)
     _stub_kb(monkeypatch)
-    # All 6 slots already filled in Lex's view; no question asked yet.
     slots = {
         s: {"value": {"originalValue": v, "interpretedValue": v}}
         for s, v in [
             ("when", "tomorrow"), ("what", "OFFICE_CLEANING"),
             ("area", "30 m2"), ("rooms", "3"), ("urgency", "high"),
-            ("email", "a@b.com"),
         ]
     }
     event = {
@@ -174,6 +173,7 @@ def test_questions_prompt_appears_after_all_slots_filled(monkeypatch):
     }
     response = handle_lex_event(event)
     assert response["sessionState"]["dialogAction"]["type"] == "ElicitSlot"
-    assert response["sessionState"]["sessionAttributes"]["questionsPrompted"] == "1"
+    assert response["sessionState"]["sessionAttributes"]["phase"] == "estimate_spoken"
     spoken = response["messages"][0]["content"]
-    assert "questions" in spoken.lower()
+    # Estimate-style prompt, not "any questions"
+    assert "questions" not in spoken.lower()
