@@ -65,6 +65,22 @@ def test_lex_completes_when_all_slots_filled():
     assert state["intent"]["state"] == "Fulfilled"
 
 
+def test_brain_skipped_when_not_configured(monkeypatch):
+    """With DDB_BACKEND=mock the brain branch is gated out; the handler must
+    not crash and must not stamp `brainComputed`."""
+    monkeypatch.delenv("DDB_BACKEND", raising=False)
+    monkeypatch.delenv("BRAIN_FUNCTION_NAME", raising=False)
+    response = handle_lex_event(
+        _lex_event(
+            "I need a move-out cleaning tomorrow for 85 square meters, urgent, customer@example.com",
+        ),
+    )
+    # 5 slots filled; next ElicitSlot is rooms. No brainComputed flag yet
+    # because we're in mock-DDB mode (Brain only fires when USE_REAL_DDB is on).
+    attrs = response["sessionState"]["sessionAttributes"]
+    assert attrs.get("brainComputed") in (None, "")
+
+
 def test_lex_keeps_session_attributes_stable_across_turns():
     response_a = handle_lex_event(_lex_event("move out tomorrow"))
     attrs = response_a["sessionState"]["sessionAttributes"]

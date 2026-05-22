@@ -40,6 +40,7 @@ import lex_v2
 from bedrock_client import BedrockClaudeClient
 from polly_client import PollyClient
 from session import CallSession, drop_session, get_session, new_session
+from tool_dispatcher import dispatch_tool
 from slot_adapter import save_slot as save_slot_adapter
 from slot_extraction import apply_extractions, extract_slots_deterministic
 from slot_state import REQUIRED_SLOTS, SlotState
@@ -176,6 +177,27 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     attrs["bookingId"] = booking_id
     attrs["companyId"] = company_id
 
+    # Brain mid-call: once `what` + `area` are known, invoke the Brain Lambda
+    # for a live price estimate. The Wall picks the result up via the
+    # `Bookings#current.brain` → DDB Streams → `BrainEstimate` event chain.
+    # Skip if we already computed it this session (sessionAttribute pin).
+    if (
+        USE_REAL_DDB
+        and state.what
+        and state.area is not None
+        and attrs.get("brainComputed") != "1"
+    ):
+        try:
+            _maybe_compute_brain(
+                call_id=call_id,
+                booking_id=booking_id,
+                company_id=company_id,
+                state=state,
+            )
+            attrs["brainComputed"] = "1"
+        except Exception as exc:  # pragma: no cover - depends on AWS env
+            logger.warning("compute_price failed: %s", exc)
+
     next_slot = next(
         (s for s in lex_v2.REQUIRED_SLOT_ORDER if not _slot_filled(state, s)),
         None,
@@ -276,6 +298,59 @@ def _state_from_lex_slots(lex_slots: dict[str, Any]) -> SlotState:
 def _slot_filled(state: SlotState, slot: str) -> bool:
     value = getattr(state, slot, None)
     return value not in (None, "")
+
+
+def _maybe_compute_brain(
+    *,
+    call_id: str,
+    booking_id: str,
+    company_id: str,
+    state: SlotState,
+) -> None:
+    """Invoke the Brain Lambda once `what` + `area` are filled.
+
+    Writes the estimate into `Bookings#current.brain`; the DDB stream picks
+    it up and the wall fan-out publishes a `BrainEstimate` event.
+    """
+    # Brain wants raw numbers; our extractor stores formatted strings like
+    # "85 m2". Strip non-numeric chars before forwarding.
+    import re as _re
+    def _num(value):
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            return value
+        m = _re.search(r"-?\d+(?:\.\d+)?", str(value))
+        return float(m.group(0)) if m else None
+
+    slots = {
+        "what": state.what,
+        "area": _num(state.area),
+        "rooms": _num(state.rooms),
+        "urgency": state.urgency,
+        "when": state.when,
+        "email": state.email,
+    }
+    result = dispatch_tool(
+        "compute_price",
+        {"companyId": company_id, "callId": call_id, "bookingId": booking_id, "slots": slots},
+    )
+    if result.get("status") in ("brain_not_configured", "brain_error"):
+        logger.info("compute_price skipped: %s", result.get("status"))
+        return
+    if not isinstance(result, dict) or "price" not in result:
+        logger.info("compute_price returned no price: %s", str(result)[:200])
+        return
+    brain_payload = {
+        "serviceType": result.get("serviceType", ""),
+        "price": result.get("price"),
+        "currency": result.get("currency", ""),
+        "needsPhotos": bool(result.get("needsPhotos", False)),
+    }
+    if result.get("crew"):
+        brain_payload["crew"] = result["crew"]
+    ddb.save_brain(booking_id, brain_payload)
+    logger.info("BRAIN saved: %s", brain_payload)
 
 
 # ---------------------------------------------------------------------------
