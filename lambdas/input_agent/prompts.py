@@ -6,7 +6,7 @@ Capture slots, answer grounded FAQ questions from retrieved context, and call
 tools instead of inventing prices or company policy.
 """
 
-REQUIRED_SLOTS = ("when", "what", "area", "rooms", "urgency", "email")
+REQUIRED_SLOTS = ("when", "what", "area", "rooms", "urgency", "location")
 
 
 def persona_prompt(company: dict) -> str:

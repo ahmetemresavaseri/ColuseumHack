@@ -36,12 +36,12 @@ def _lex_event(
 def test_lex_first_turn_elicits_remaining_slot():
     response = handle_lex_event(
         _lex_event(
-            "I need a move-out cleaning tomorrow for 85 square meters, urgent, customer@example.com",
+            "I need a move-out cleaning tomorrow for 85 square meters, urgent",
         ),
     )
     state = response["sessionState"]
     assert state["dialogAction"]["type"] == "ElicitSlot"
-    # 5 slots extracted (when, what, area, urgency, email) — only `rooms` remains.
+    # 4 slots extracted (when, what, area, urgency) — `rooms` is next.
     assert state["dialogAction"]["slotToElicit"] == "rooms"
     assert state["sessionAttributes"]["callId"].startswith("call-")
     assert state["sessionAttributes"]["bookingId"].startswith("booking-")
@@ -54,22 +54,29 @@ def test_lex_completes_when_all_slots_filled():
     attrs: dict[str, str] = {}
     slots: dict = {}
     transcripts = [
-        "I need a move-out cleaning tomorrow for 85 m2, urgent, customer@example.com",
-        "4 rooms",   # fills last booking slot -> handler speaks estimate
-        "okay",      # react_to_estimate -> email already filled, skips to any_questions
-        "no thanks", # answer to "any questions?" -> close
+        "I need a move-out cleaning tomorrow for 85 m2, urgent",
+        "4 rooms",          # fills last booking slot -> handler speaks estimate
+        "sounds good",      # react_to_estimate -> no location yet, asks for one
+        "Bahnhofstrasse 23, Zurich",  # location -> any_questions prompt
+        "no thanks",        # answer to "any questions?" -> close
     ]
     phases = []
+    last_elicit = None
     for transcript in transcripts:
+        # Simulate Lex auto-capture: caller's reply lands in the slot Lex
+        # was eliciting on the previous turn.
+        if last_elicit and last_elicit not in slots:
+            slots = dict(slots)
+            slots[last_elicit] = {
+                "value": {"originalValue": transcript, "interpretedValue": transcript}
+            }
         response = handle_lex_event(_lex_event(transcript, attrs, slots))
         attrs = response["sessionState"]["sessionAttributes"]
         slots = response["sessionState"]["intent"].get("slots") or {}
+        last_elicit = response["sessionState"]["dialogAction"].get("slotToElicit")
         phases.append(attrs.get("phase"))
     state = response["sessionState"]
-    # First turn doesn't set phase explicitly (defaults to collecting); then
-    # estimate_spoken after rooms fills, then any_questions twice (the
-    # react-skip-to-questions path and the close response).
-    assert phases == [None, "estimate_spoken", "any_questions", "any_questions"]
+    assert phases == [None, "estimate_spoken", "asking_location", "any_questions", "any_questions"]
     assert state["dialogAction"]["type"] == "Close"
     assert state["intent"]["state"] == "Fulfilled"
 
@@ -127,13 +134,33 @@ def test_urgency_derived_from_when():
     assert _derive_urgency_from_when("") is None
 
 
-def test_looks_like_email_rejects_questions():
-    from handler import _looks_like_email
-    assert not _looks_like_email("i have another question")
-    assert not _looks_like_email("no thanks")
-    assert not _looks_like_email("")
-    assert _looks_like_email("a@b.com")
-    assert _looks_like_email("Customer.Name+demo@example.co.uk")
+def test_looks_like_location_rejects_questions():
+    from handler import _looks_like_location
+    assert not _looks_like_location("i have another question")
+    assert not _looks_like_location("do you also do windows")
+    assert not _looks_like_location("")
+    assert not _looks_like_location("ok")
+    assert _looks_like_location("Zurich Altstadt")
+    assert _looks_like_location("Bahnhofstrasse 23, Zurich")
+    assert _looks_like_location("8001 Zurich")
+
+
+def test_validate_slot_rejects_bad_what_and_rooms():
+    from handler import _validate_slot_value
+    # 'what' must be a canonical service type
+    assert _validate_slot_value("what", "i'm sorry") is None
+    assert _validate_slot_value("what", "MOVE_OUT_CLEANING") == "MOVE_OUT_CLEANING"
+    assert _validate_slot_value("what", "office cleaning") == "office cleaning"
+    # 'rooms' must parse as a positive number
+    assert _validate_slot_value("rooms", "oh oh") is None
+    assert _validate_slot_value("rooms", "5") == 5
+    assert _validate_slot_value("rooms", 4) == 4
+    # 'urgency' must be canonical
+    assert _validate_slot_value("urgency", "kinda urgent") is None
+    assert _validate_slot_value("urgency", "high") == "high"
+    # 'area' needs a digit
+    assert _validate_slot_value("area", "no idea") is None
+    assert _validate_slot_value("area", "50 m2") == "50 m2"
 
 
 def test_when_fallback_accepts_free_text():

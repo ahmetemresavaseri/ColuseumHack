@@ -38,7 +38,7 @@ def _demo_active_call(company_id: str) -> dict[str, Any]:
             "area": "85 m2",
             "rooms": "4",
             "urgency": "urgent",
-            "email": "customer@example.com",
+            "location": "Zurich Altstadt",
         },
         "transcript": [
             {"seq": 1, "speaker": "Agent", "text": "Hello, Glanz AG. How can I help?"},

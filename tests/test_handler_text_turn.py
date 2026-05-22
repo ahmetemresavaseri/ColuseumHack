@@ -40,17 +40,17 @@ def test_text_turn_emits_transcript_and_slots():
 
 def test_slot_adapter_returns_canonical_shape():
     result = slot_adapter.save_slot(
-        call_id="c1", booking_id="b1", slot="email", value="a@b.com"
+        call_id="c1", booking_id="b1", slot="location", value="Zurich Altstadt"
     )
     assert result == {
         "callId": "c1",
         "bookingId": "b1",
-        "slot": "email",
-        "value": "a@b.com",
+        "slot": "location",
+        "value": "Zurich Altstadt",
         "status": "saved",
         "backend": "mock",
     }
-    assert slot_adapter.snapshot("c1", "b1") == {"email": "a@b.com"}
+    assert slot_adapter.snapshot("c1", "b1") == {"location": "Zurich Altstadt"}
 
 
 def test_text_turn_does_not_re_emit_filled_slot():

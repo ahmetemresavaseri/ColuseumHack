@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 INTENT_NAME = "CollectBooking"
-REQUIRED_SLOT_ORDER = ("when", "what", "area", "rooms", "urgency", "email")
+REQUIRED_SLOT_ORDER = ("when", "what", "area", "rooms", "urgency", "location")
 
 PROMPTS: dict[str, str] = {
     "when": "When would you like the cleaning?",
@@ -25,7 +25,7 @@ PROMPTS: dict[str, str] = {
     "area": "How many square meters or square feet is the space?",
     "rooms": "How many rooms?",
     "urgency": "How urgent is this — same day, this week, or flexible?",
-    "email": "What email address should I send the confirmation to?",
+    "location": "What's the address or area where the cleaning will take place?",
 }
 
 

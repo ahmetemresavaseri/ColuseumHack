@@ -211,7 +211,7 @@ function inflateWallEvent(row: WallRow): WallEvent | null {
           | "area"
           | "rooms"
           | "urgency"
-          | "email",
+          | "location",
         value: String(payload.value || ""),
         bookingId: payload.bookingId as string | undefined,
       };

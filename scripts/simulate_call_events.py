@@ -37,7 +37,7 @@ CALLER_TURNS: list[tuple[str, str]] = [
     ("Agent", "Hello, Glanz AG. How can I help?"),
     ("Caller", "I need a move-out cleaning tomorrow for 85 square meters."),
     ("Agent", "Got it. How many rooms?"),
-    ("Caller", "4 rooms, it's urgent, email me at customer@example.com."),
+    ("Caller", "4 rooms, it's urgent, location is Zurich Altstadt."),
 ]
 
 

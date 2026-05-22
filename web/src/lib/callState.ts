@@ -6,7 +6,7 @@ const EMPTY_SLOTS: SlotMap = {
   area: "",
   rooms: "",
   urgency: "",
-  email: "",
+  location: "",
 };
 
 const SLOT_KEYS: SlotKey[] = [
@@ -15,7 +15,7 @@ const SLOT_KEYS: SlotKey[] = [
   "area",
   "rooms",
   "urgency",
-  "email",
+  "location",
 ];
 
 export function emptyCall(companyId: string, companyName: string): LiveCall {

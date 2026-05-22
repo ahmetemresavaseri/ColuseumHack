@@ -68,7 +68,6 @@ WHEN_KEYWORDS = [
     "sunday",
 ]
 
-EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 AREA_RE = re.compile(
     r"(\d+(?:\.\d+)?)\s*(?:m2|m²|sqm|square\s*meters?|sq\s*ft|sqft|square\s*feet)",
     re.IGNORECASE,
@@ -126,16 +125,6 @@ def _parse_word_number(text: str) -> int | None:
             return None
     total += chunk
     return total if found_any else None
-
-
-# Voice-spelled emails: "a. b. c. at gmail dot com" → "abc@gmail.com".
-# Captures repeated 1-2 char tokens (a, b, c) before "at", then "<word> dot
-# <word>" after. Best-effort; not robust against arbitrary spelling.
-VOICE_EMAIL_RE = re.compile(
-    r"\b([A-Za-z](?:\.\s*[A-Za-z])+)\s*\.?\s*(?:at|@)\s*([A-Za-z0-9]+)"
-    r"\s*(?:dot|\.)\s*([A-Za-z]{2,})\b",
-    re.IGNORECASE,
-)
 
 
 def extract_slots_deterministic(text: str, state: SlotState | None = None) -> list[SlotPair]:
@@ -198,17 +187,9 @@ def extract_slots_deterministic(text: str, state: SlotState | None = None) -> li
                 found.append(("urgency", label))
                 break
 
-    if not state.email:
-        match = EMAIL_RE.search(text)
-        if match:
-            found.append(("email", match.group(0)))
-        else:
-            voice = VOICE_EMAIL_RE.search(text)
-            if voice:
-                local = re.sub(r"[\s.]", "", voice.group(1)).lower()
-                domain = voice.group(2).lower()
-                tld = voice.group(3).lower()
-                found.append(("email", f"{local}@{domain}.{tld}"))
+    # `location` has no transcript-level extractor — it's a free-form text
+    # slot. The handler's `_bare_number_fallback` accepts the raw value when
+    # Lex was eliciting `location`.
 
     # Bare-number utterances ("thirty", "5") are intentionally NOT handled
     # here — they're context-dependent (caller's "thirty" could be area OR

@@ -15,7 +15,7 @@ export const mockCall: LiveCall = {
     area: "85 m2",
     rooms: "4",
     urgency: "urgent",
-    email: "customer@example.com",
+    location: "Zurich Altstadt",
   },
   transcript: [
     { seq: 1, speaker: "Sarah", text: "Hello, Glanz AG. How can I help?" },
@@ -126,7 +126,7 @@ export const mockEventScript: Array<{ delayMs: number; event: WallEvent }> = [
       timestamp: ts(3400),
       seq: 3,
       speaker: "Caller",
-      text: "Four rooms, it's urgent, email me at customer@example.com.",
+      text: "Four rooms, it's urgent, address is Zurich Altstadt.",
       isFinal: true,
     },
   },
@@ -159,8 +159,8 @@ export const mockEventScript: Array<{ delayMs: number; event: WallEvent }> = [
       callId,
       companyId,
       timestamp: ts(4100),
-      slot: "email",
-      value: "customer@example.com",
+      slot: "location",
+      value: "Zurich Altstadt",
     },
   },
   {

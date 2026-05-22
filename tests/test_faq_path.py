@@ -133,8 +133,8 @@ def test_handle_faq_turn_final_loops_for_more_questions(monkeypatch):
     monkeypatch.delenv("DDB_BACKEND", raising=False)
     _stub_kb(monkeypatch)
     lex_slots = {
-        "email": {"value": {"originalValue": "How much per square meter?",
-                            "interpretedValue": "How much per square meter?"}},
+        "location": {"value": {"originalValue": "How much per square meter?",
+                               "interpretedValue": "How much per square meter?"}},
     }
     response = _handle_faq_turn(
         transcript="How much per square meter?",

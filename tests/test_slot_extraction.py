@@ -4,17 +4,16 @@ from slot_extraction import apply_extractions, extract_slots_deterministic
 from slot_state import SlotState
 
 
-def test_extract_what_when_area_email():
+def test_extract_what_when_area():
     state = SlotState()
     pairs = extract_slots_deterministic(
-        "I need a move-out cleaning tomorrow for 85 m2, email customer@example.com",
+        "I need a move-out cleaning tomorrow for 85 m2",
         state,
     )
     accepted = dict(apply_extractions(state, pairs))
     assert accepted["what"] == "MOVE_OUT_CLEANING"
     assert accepted["when"] == "tomorrow"
     assert "m2" in str(accepted["area"]).lower()
-    assert accepted["email"] == "customer@example.com"
 
 
 def test_extract_rooms_and_urgency():
@@ -70,27 +69,13 @@ def test_bare_word_number_no_longer_auto_rooms():
     assert state.rooms is None
 
 
-def test_voice_spelled_email():
-    state = SlotState()
-    pairs = extract_slots_deterministic("a. b. c. at gmail dot com", state)
-    apply_extractions(state, pairs)
-    assert state.email == "abc@gmail.com"
-
-
-def test_voice_email_at_symbol_variant():
-    state = SlotState()
-    pairs = extract_slots_deterministic("t. e. s. t. @ gmail dot com", state)
-    apply_extractions(state, pairs)
-    assert state.email == "test@gmail.com"
-
-
 def test_required_slots_progress():
     state = SlotState()
     pairs = extract_slots_deterministic(
-        "Move-out cleaning tomorrow, 85 m2, 4 rooms, urgent, customer@example.com",
+        "Move-out cleaning tomorrow, 85 m2, 4 rooms, urgent",
         state,
     )
     apply_extractions(state, pairs)
     missing = state.missing()
-    # 5 slots from this single utterance — only `when`/`what`/etc. may remain.
-    assert len(missing) <= 1
+    # 4 slots extracted from one utterance — only `location` left to elicit.
+    assert missing == ["location"]

@@ -136,14 +136,14 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     transcript = lex_v2.get_input_transcript(event)
 
     # Conversation phases (sessionAttribute "phase"):
-    #   collecting       — eliciting the 5 booking slots
-    #   estimate_spoken  — Brain quote spoken; caller can react / ask
-    #   asking_email     — collecting the confirmation email
-    #   any_questions    — final "anything else?" beat before goodbye
+    #   collecting        — eliciting the 5 booking slots
+    #   estimate_spoken   — Brain quote spoken; caller can react / ask
+    #   asking_location   — collecting the address / area for the booking
+    #   any_questions     — final "anything else?" beat before goodbye
     #
     # Each phase has different rules for routing the caller's reply:
     # `estimate_spoken` and `any_questions` intercept the reply BEFORE the
-    # slot pipeline runs, so the reply doesn't pollute the email transport
+    # slot pipeline runs, so the reply doesn't pollute the location transport
     # slot Lex is technically eliciting.
     phase = attrs.get("phase", "collecting")
 
@@ -203,10 +203,11 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
         payload = lex_slots.get(elicited_this_turn) or {}
         value_dict = (payload.get("value") or {}) if isinstance(payload, dict) else {}
         raw = (value_dict.get("interpretedValue") or value_dict.get("originalValue") or "").strip()
-        if raw:
+        validated_raw = _validate_slot_value(elicited_this_turn, raw)
+        if validated_raw is not None:
             save_slot_adapter(
                 call_id=call_id, booking_id=booking_id,
-                slot=elicited_this_turn, value=raw,
+                slot=elicited_this_turn, value=validated_raw,
             )
 
     state = _state_from_lex_slots(lex_slots)
@@ -254,13 +255,12 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
                 slot="urgency", value=derived,
             )
 
-    # Phase = "asking_email": validate the email the caller just gave us.
-    # A bare "i have another question" should NOT be accepted as an email —
-    # treat such replies as FAQ questions (if they look like one) or as a
-    # re-prompt trigger otherwise.
-    if phase == "asking_email":
-        email_value = str(state.email or "")
-        if _slot_filled(state, "email") and _looks_like_email(email_value):
+    # Phase = "asking_location": validate the address the caller just gave us.
+    # If the reply is too short / blank / clearly a question, re-prompt
+    # (and answer the question from KB on the way back).
+    if phase == "asking_location":
+        location_value = str(state.location or "")
+        if _slot_filled(state, "location") and _looks_like_location(location_value):
             attrs["phase"] = "any_questions"
             prompt = (
                 "Before we wrap up — do you have any questions about our "
@@ -268,23 +268,23 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
             )
             _log_agent_turn(call_id, company_id, prompt)
             return lex_v2.elicit_slot(
-                "email", prompt,
+                "location", prompt,
                 session_attributes=attrs,
                 intent_name=intent.get("name", lex_v2.INTENT_NAME),
                 intent_slots=lex_slots,
             )
 
-        # Caller's reply wasn't an email — undo the bad save.
-        if _slot_filled(state, "email"):
+        # Caller's reply wasn't a usable location — undo the bad save.
+        if _slot_filled(state, "location"):
             try:
                 save_slot_adapter(
                     call_id=call_id, booking_id=booking_id,
-                    slot="email", value="",
+                    slot="location", value="",
                 )
             except Exception:  # pragma: no cover
                 pass
-            lex_slots.pop("email", None)
-            state.update("email", None)
+            lex_slots.pop("location", None)
+            state.update("location", None)
 
         answer_prefix = ""
         citations = []
@@ -294,15 +294,15 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
             answer_prefix = f"{answer} "
 
         prompt = (
-            f"{answer_prefix}What email address should I send the "
-            "confirmation to?"
+            f"{answer_prefix}What's the address or area where the cleaning "
+            "will take place?"
         )
         _log_agent_turn(
             call_id, company_id, prompt,
             citations=citations or None,
         )
         return lex_v2.elicit_slot(
-            "email", prompt,
+            "location", prompt,
             session_attributes=attrs,
             intent_name=intent.get("name", lex_v2.INTENT_NAME),
             intent_slots=lex_slots,
@@ -334,7 +334,7 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
         attrs["phase"] = "estimate_spoken"
         _log_agent_turn(call_id, company_id, prompt)
         return lex_v2.elicit_slot(
-            "email", prompt,
+            "location", prompt,
             session_attributes=attrs,
             intent_name=intent.get("name", lex_v2.INTENT_NAME),
             intent_slots=lex_slots,
@@ -404,6 +404,9 @@ _QUESTION_VOCAB = {
     "include", "covered", "cover", "policy", "weekend", "evening",
     "hours", "guarantee", "cancel", "photos", "needed", "service",
     "do you", "can you", "does it", "is it", "are you",
+    # "Statement-of-intent-to-ask" patterns — caller signals they have a
+    # question before asking it.
+    "question", "ask",
 }
 _QUESTION_FIRST_TOKENS = {
     "how", "what", "when", "where", "why", "who",
@@ -537,7 +540,7 @@ def _handle_faq_turn(
         response_text = f"{answer} {followup}"
         _log_agent_turn(call_id, company_id, response_text, citations=citations)
         return lex_v2.elicit_slot(
-            "email", response_text,
+            "location", response_text,
             session_attributes=attrs,
             intent_name=intent.get("name", lex_v2.INTENT_NAME),
             intent_slots=lex_slots,
@@ -585,8 +588,8 @@ def _react_to_estimate(
 
     Their reply is either a reaction ("okay", "sounds good") or a question
     about the price/service. Either way, acknowledge and ask for their
-    confirmation email next. We pop the just-captured email-transport slot
-    so the reaction text doesn't pollute the real email value.
+    address/area next. We pop the just-captured location-transport slot so
+    the reaction text doesn't pollute the real location value.
     """
     elicited = _just_elicited_slot(lex_slots, transcript) if transcript else None
     if elicited:
@@ -604,19 +607,19 @@ def _react_to_estimate(
         answer, citations = _compose_faq_answer(kb_result)
         answer_prefix = f"{answer} "
 
-    # Skip the redundant email ask if the caller already gave one during slot
-    # collection — go straight to the closing "any questions?" beat.
-    if _slot_filled(state, "email"):
+    # Skip the redundant location ask if the caller already gave one during
+    # slot collection — go straight to the closing "any questions?" beat.
+    if _slot_filled(state, "location"):
         attrs["phase"] = "any_questions"
         prompt = (
             f"{answer_prefix}Before we wrap up — do you have any questions "
             "about our services, pricing, or scheduling?"
         )
     else:
-        attrs["phase"] = "asking_email"
+        attrs["phase"] = "asking_location"
         prompt = (
-            f"{answer_prefix}What email address should I send the "
-            "confirmation to?"
+            f"{answer_prefix}What's the address or area where the cleaning "
+            "will take place?"
         )
 
     attrs["callId"] = call_id
@@ -627,7 +630,7 @@ def _react_to_estimate(
         citations=citations or None,
     )
     return lex_v2.elicit_slot(
-        "email", prompt,
+        "location", prompt,
         session_attributes=attrs,
         intent_name=intent.get("name", lex_v2.INTENT_NAME),
         intent_slots=lex_slots,
@@ -648,13 +651,13 @@ def _finalize_after_questions(
     """Close the call after the caller declined to ask anything.
 
     Don't run slot cleaning — Lex auto-captured the "no thanks" reply against
-    the transport slot (email), but the real email was already saved earlier.
-    Just log the caller turn, speak the price summary, end the call.
+    the transport slot (location), but the real location was already saved
+    earlier. Just log the caller turn, speak the price summary, end the call.
     """
     elicited = _just_elicited_slot(lex_slots, transcript)
     if elicited:
-        # Restore the slot to its previously-captured value (the email we
-        # already saved). Easiest: just drop the new capture from Lex's view.
+        # Restore the slot to its previously-captured value. Easiest: just
+        # drop the new capture from Lex's view.
         lex_slots.pop(elicited, None)
 
     if transcript:
@@ -706,21 +709,59 @@ def _promote_to_collect_booking(event: dict[str, Any]) -> dict[str, Any] | None:
     return {"name": "CollectBooking", "slots": {}, "state": "InProgress"}
 
 
+_SERVICE_TYPES = {
+    "MOVE_OUT_CLEANING", "OFFICE_CLEANING", "WINDOW_CLEANING",
+    "CONSTRUCTION_CLEANING", "FACILITY_MAINTENANCE",
+}
+_URGENCY_VALUES = {"low", "medium", "high", "urgent"}
+
+
+def _validate_slot_value(slot: str, value: Any) -> Any | None:
+    """Return the value if it's plausible for this slot, else None.
+
+    The handler uses this to reject obviously-wrong captures (e.g.
+    `what="i'm sorry"`, `rooms="oh oh"`) so the caller gets re-prompted
+    instead of saving garbage to the booking.
+    """
+    if value is None or value == "":
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if slot == "what":
+        normalized = s.upper().replace("-", "_").replace(" ", "_")
+        return s if normalized in _SERVICE_TYPES else None
+    if slot == "rooms":
+        try:
+            n = float(s)
+        except (TypeError, ValueError):
+            return None
+        if n <= 0:
+            return None
+        return value if isinstance(value, (int, float)) else (int(n) if n.is_integer() else n)
+    if slot == "urgency":
+        return s.lower() if s.lower() in _URGENCY_VALUES else None
+    if slot == "area":
+        import re as _re
+        return s if _re.search(r"\d", s) else None
+    if slot in {"when", "location"}:
+        return s if 0 < len(s) <= 100 else None
+    return None
+
+
 def _clean_lex_slots(lex_slots: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
-    """Run each Lex auto-captured slot value through the deterministic extractor.
+    """Canonicalize each Lex auto-captured slot AND validate it.
 
-    Lex stores `originalValue=<full caller utterance>` when using
-    AMAZON.FreeFormInput. For each captured value:
-      1. If the regex extractor finds a canonical value for that slot inside
-         the raw text, use it (e.g. "Tomorrow for 85 m²" → when="tomorrow").
-      2. Otherwise, if the slot is `area` or `rooms` and the raw text parses
-         as a bare number (digit or word — "30", "thirty"), use that. This
-         is context-aware: the slot Lex just elicited is the one being
-         filled, so "thirty" answering "How many square meters?" becomes
-         area="30 m2", not rooms=30.
+    For every slot:
+      1. Run the regex extractor on the raw text; if it finds a canonical
+         value (e.g. "office" → "OFFICE_CLEANING"), use that.
+      2. Otherwise try `_bare_number_fallback` for area/rooms/when.
+      3. Validate via `_validate_slot_value`. If invalid (e.g. `what` =
+         "i'm sorry"), POP the slot from `lex_slots` — that way Lex
+         re-elicits it instead of accepting garbage.
 
-    Returns the cleaned dict AND a list of `(slot, canonical_value)` pairs
-    that actually got cleaned, so the handler can persist them.
+    Returns the cleaned dict AND a list of `(slot, value)` pairs that the
+    handler should persist via the adapter.
     """
     cleaned: dict[str, Any] = {}
     changed: list[tuple[str, Any]] = []
@@ -736,9 +777,15 @@ def _clean_lex_slots(lex_slots: dict[str, Any]) -> tuple[dict[str, Any], list[tu
         canonical = next((v for s, v in pairs if s == slot), None)
         if canonical is None:
             canonical = _bare_number_fallback(slot, raw)
-        if canonical is not None and str(canonical) != raw:
-            cleaned[slot] = _to_lex_slot_value(canonical)
-            changed.append((slot, canonical))
+        # Validate (the canonical or raw, whichever we ended up with).
+        candidate = canonical if canonical is not None else raw
+        validated = _validate_slot_value(slot, candidate)
+        if validated is None:
+            # Drop the slot entirely so Lex re-elicits.
+            continue
+        if str(validated) != raw:
+            cleaned[slot] = _to_lex_slot_value(validated)
+            changed.append((slot, validated))
         else:
             cleaned[slot] = payload
     return cleaned, changed
@@ -774,9 +821,10 @@ def _bare_number_fallback(slot: str, raw: str) -> Any | None:
         if slot == "area":
             return f"{n} m2"
         return n
-    if slot == "when":
+    if slot in {"when", "location"}:
         cleaned = raw.rstrip(".").strip()
-        if 0 < len(cleaned) <= 60:
+        max_len = 60 if slot == "when" else 100
+        if 0 < len(cleaned) <= max_len:
             return cleaned
     return None
 
@@ -800,16 +848,25 @@ def _slot_filled(state: SlotState, slot: str) -> bool:
     return value not in (None, "")
 
 
-def _looks_like_email(text: str) -> bool:
-    """Strict email shape check: must contain an @ and a TLD-like suffix.
+def _looks_like_location(text: str) -> bool:
+    """Loose plausibility check for a spoken address / area.
 
-    Used in the asking_email phase to reject captures like 'i have another
-    question' that the cleaner didn't normalize.
+    Used in the asking_location phase to reject captures like 'i have
+    another question' (clearly a follow-up question, not an address).
+    Heuristic: at least 3 characters, at least one alpha, and NOT a
+    standalone question (`_is_question` returns False).
     """
     if not text:
         return False
-    import re as _re
-    return bool(_re.search(r"[\w.+-]+@[\w-]+\.[\w-]{2,}", text))
+    s = text.strip()
+    if len(s) < 3:
+        return False
+    if not any(c.isalpha() for c in s):
+        return False
+    # Reject obvious "I have another question" style replies.
+    if _is_question(s):
+        return False
+    return True
 
 
 def _derive_urgency_from_when(when_text: str) -> str | None:
@@ -876,10 +933,10 @@ _CURRENCY_SPOKEN = {
 
 
 def _compose_estimate_speech(booking_id: str, state: SlotState) -> str:
-    """Speak the price + feasibility note (no goodbye, no email mention).
+    """Speak the price + feasibility note (no goodbye).
 
     Used at the end of the `collecting` phase to read the Brain quote back
-    to the caller before we ask for their email.
+    to the caller before we ask for their address.
     """
     fallback = "Got everything I need to put together an estimate."
     if not USE_REAL_DDB:
@@ -924,7 +981,7 @@ def _compose_estimate_speech(booking_id: str, state: SlotState) -> str:
 
 def _compose_close_message(booking_id: str, state: SlotState) -> str:
     """Goodbye line — price was already spoken in the estimate phase."""
-    return "We'll send a confirmation to your email. Thanks for calling Glanz AG. Goodbye!"
+    return "We'll be in touch shortly to confirm. Thanks for calling Glanz AG. Goodbye!"
 
 
 def _maybe_compute_brain(
@@ -956,7 +1013,7 @@ def _maybe_compute_brain(
         "rooms": _num(state.rooms),
         "urgency": state.urgency,
         "when": state.when,
-        "email": state.email,
+        "location": state.location,
     }
     result = dispatch_tool(
         "compute_price",
