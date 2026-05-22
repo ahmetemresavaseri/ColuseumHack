@@ -1,19 +1,16 @@
-"""Stage 2 — deploy the Atrium Input Agent Lambda.
+"""Deploy the Atrium Input Agent Lambda.
 
 Idempotent:
   - Creates IAM role atrium-input-agent-role if missing, ensures policies.
   - Packages lambdas/input_agent/ as ZIP and creates/updates the function.
+  - Grants Amazon Lex permission to invoke the function (idempotent).
 
-Wiring NOTE (2026-05-22): the original version of this script also wired the
-function into an Amazon Connect contact flow. **Amazon Connect is NOT on the
-hackathon allow-list**, so all Connect-wiring steps have been removed. The
-function is now invoked from API Gateway WebSocket (`$connect` / `$message` /
-`$disconnect` routes) created by `infrastructure/cdk_app.py`. Add the
-WS-invoke permission there, not here.
+Wiring: the function is the CodeHook target of an Amazon Lex V2 bot, which is
+in turn invoked from the Connect contact flow's GetCustomerInput block. Run
+`scripts/provision_lex.py` after deploy to provision the bot and wire the
+arn, then `scripts/provision_connect.py` to install the contact flow.
 
-State file used to live at `scripts/.connect_state.json`; it's now optional —
-if present, only its `LambdaFunctionArn` field is updated. New deployments
-write a fresh `scripts/.deploy_state.json` instead.
+State is written to `scripts/.deploy_state.json`.
 """
 from __future__ import annotations
 
@@ -40,11 +37,10 @@ ROLE_NAME = "atrium-input-agent-role"
 RUNTIME = "python3.13"
 HANDLER = "handler.lambda_handler"
 MEMORY_MB = 1024
-# Long-running for the audio WS bridge — Connect's 8s ceiling no longer applies.
-# API GW WS allows up to 29s per route invocation; the Input Agent uses a
-# persistent inner loop tied to the WS lifecycle, so a generous Lambda timeout
-# is appropriate. (Tune downward once we know the real per-message ceiling.)
-TIMEOUT_S = 900
+# Lex CodeHook invocations are short turns (one round-trip per caller utterance).
+# Bedrock Converse with tool-use can take ~3-8s; 30s is a safe ceiling that
+# stays well under Lex's 30s synchronous CodeHook limit.
+TIMEOUT_S = 30
 
 ASSUME_ROLE_DOC = {
     "Version": "2012-10-17",
@@ -55,10 +51,12 @@ ASSUME_ROLE_DOC = {
     }],
 }
 
-# IAM policy — ONLY services on the hackathon allow-list.
-# Dropped vs. previous version: kinesisvideo:*, connect:*
-# Added: transcribe:*, polly:*, dynamodb:*, execute-api:* (API GW WS post),
-#        bedrock-agent-runtime:Retrieve (for KB.Retrieve)
+# IAM policy for the Lex-CodeHook path:
+#   - Bedrock Converse + KB Retrieve   (the LLM turn loop)
+#   - DynamoDB                          (slot persistence, company config, calls)
+#   - Lambda invoke                     (Brain Lambda for compute_price)
+# Polly + Transcribe perms are kept for the future browser-mic streaming path
+# but unused on the Lex path (Lex handles ASR + TTS).
 INLINE_POLICY_DOC = {
     "Version": "2012-10-17",
     "Statement": [
@@ -261,7 +259,7 @@ def deploy_function(role_arn: str, zip_bytes: bytes) -> str:
 def main() -> int:
     state = load_state()
     print(f"=== Deploying {FUNCTION_NAME} (account={get_account_id()}, region={region()}) ===")
-    print("    Architecture: API Gateway WebSocket (audio) — Connect wiring removed.")
+    print("    Architecture: Connect contact flow -> Lex GetCustomerInput -> Lambda CodeHook (this fn)")
     role_arn = ensure_role()
     zip_bytes = package_zip()
     function_arn = deploy_function(role_arn, zip_bytes)
@@ -274,12 +272,33 @@ def main() -> int:
     })
     save_state(state)
 
+    grant_lex_invoke(function_arn)
+
     print("\n=== Done. ===")
     print(f"     Function ARN: {function_arn}")
     print(f"     Logs: aws logs tail /aws/lambda/{FUNCTION_NAME} --follow (or use scripts/tail_logs.py)")
-    print("     Next: wire this ARN as the integration target on the audio API GW WS routes")
-    print("           ($connect, $message, $disconnect) in infrastructure/cdk_app.py.")
+    print("     Next: run scripts/provision_lex.py, then scripts/provision_connect.py.")
     return 0
+
+
+def grant_lex_invoke(function_arn: str) -> None:
+    """Idempotently grant Amazon Lex permission to invoke this Lambda."""
+    lc = lambda_client()
+    statement_id = "AllowLexInvoke"
+    try:
+        lc.add_permission(
+            FunctionName=FUNCTION_NAME,
+            StatementId=statement_id,
+            Action="lambda:InvokeFunction",
+            Principal="lexv2.amazonaws.com",
+        )
+        print(f"{OK} Granted lexv2.amazonaws.com -> lambda:InvokeFunction")
+    except ClientError as e:
+        code = e.response["Error"].get("Code", "")
+        if code in ("ResourceConflictException",):
+            print(f"{OK} Lex invoke permission already present (sid={statement_id})")
+            return
+        raise
 
 
 if __name__ == "__main__":

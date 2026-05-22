@@ -1,9 +1,7 @@
 """Shared boto3 client factories + identity helpers for the Atrium project.
 
-Only services on the hackathon allow-list are exposed here. Notably absent
-(and deliberately so): `connect`, `qconnect` — Amazon Connect / Q-in-Connect
-are NOT on the allow-list for this event; Atrium uses a Browser-WebRTC
-front door instead. See the plan, section "Architecture".
+The PSTN voice path uses Amazon Connect -> Amazon Lex V2 -> Lambda CodeHook ->
+Bedrock. Client factories for those services are exposed below.
 """
 from __future__ import annotations
 
@@ -91,3 +89,18 @@ def apigatewayv2():
 @lru_cache(maxsize=1)
 def dynamodb():
     return boto3.client("dynamodb", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def connect_client():
+    return boto3.client("connect", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def lex_models():
+    return boto3.client("lexv2-models", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def lex_runtime():
+    return boto3.client("lexv2-runtime", config=_default_config)

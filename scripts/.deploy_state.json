@@ -13,5 +13,5 @@
   "LambdaFunctionArn": "arn:aws:lambda:us-west-2:160659473263:function:atrium-input-agent",
   "LambdaFunctionName": "atrium-input-agent",
   "LambdaRoleArn": "arn:aws:iam::160659473263:role/atrium-input-agent-role",
-  "BotAliasArn": "arn:aws:lex:us-west-2:160659473263:bot-alias/IIMAZWZKAB/ZZWKB7NWLW"
+  "Architecture": "webrtc-api-gw-ws"
 }

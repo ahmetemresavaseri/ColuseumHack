@@ -1,55 +1,63 @@
-"""DEPRECATED — Amazon Connect is NOT on the hackathon allow-list.
+"""Provision the Amazon Connect side of the Atrium voice path.
 
-This script provisioned an Amazon Connect instance + claimed PSTN number +
-contact flow. As of 2026-05-22 the Atrium hackathon build uses a Browser-WebRTC
-front door (see plan section "Architecture") instead of PSTN, because Amazon
-Connect is not on the event's allowed-services list.
+Idempotent. Reuses an existing instance + claimed number if present, otherwise
+creates them. The contact flow `atrium-inbound` is (re)written to a Lex-driven
+flow that hands the entire dialog to the `atrium-receptionist` Lex bot.
 
-Kept in the repo for the post-hackathon PSTN drop-in roadmap item. Do NOT run
-during the hackathon — `aws_helpers.connect_client()` was also removed, so
-this file will fail on import; that is intentional.
+Prereqs:
+  1. scripts/deploy_lambda.py   (creates the Input Agent Lambda + Lex invoke perm)
+  2. scripts/provision_lex.py   (creates the bot + alias, writes .lex_state.json)
 
-To re-enable post-hackathon: restore `connect_client()` in aws_helpers.py and
-re-add `connect:*` to the Input Agent IAM role in deploy_lambda.py.
+The contact flow looks like:
+
+    Start -> UpdateContactAttributes(companyId=glanz-ag, callId=$.ContactId)
+          -> ConnectParticipantWithLexBot(BotAliasArn from .lex_state.json)
+          -> DisconnectParticipant
+
+The Lex block is what makes the call actually listen + speak. The Lambda
+CodeHook drives every turn (Bedrock Claude Sonnet 4.6 + tool-use).
 """
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
-raise SystemExit(
-    "provision_connect.py is DEPRECATED for the hackathon — Amazon Connect is "
-    "not on the allow-list. Use the WebRTC front door (see infrastructure/cdk_app.py "
-    "and the 'Architecture' section of the plan)."
-)
-
 sys.path.insert(0, str(Path(__file__).parent))
 
-import boto3
 from botocore.exceptions import ClientError
 
-from aws_helpers import connect_client, get_account_id, region  # noqa: F401 — kept for the post-hackathon restore
+from aws_helpers import connect_client, get_account_id, region
+
+STATE_FILE = Path(__file__).parent / ".connect_state.json"
+LEX_STATE_FILE = Path(__file__).parent / ".lex_state.json"
 
 INSTANCE_ALIAS = "atrium-demo"
 CONTACT_FLOW_NAME = "atrium-inbound"
-STATE_FILE = Path(__file__).parent / ".connect_state.json"
+DEFAULT_COMPANY_ID = "glanz-ag"
+GREETING = "Hi, this is Sarah from Glanz AG. How can I help you today?"
+GOODBYE = "Thanks for calling Glanz AG. Have a great day!"
+ERROR_MSG = "Sorry, something went wrong on our side. Please call back later."
+TTS_VOICE = "Matthew"  # Polly generative voice for greeting/farewell
 
 OK = "[OK]"
 WAIT = "[..]"
 FAIL = "[FAIL]"
 
 
+def load_state() -> dict:
+    return json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+
+
 def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {}
+def load_lex_state() -> dict:
+    if not LEX_STATE_FILE.exists():
+        raise SystemExit("Run scripts/provision_lex.py first — .lex_state.json missing.")
+    return json.loads(LEX_STATE_FILE.read_text())
 
 
 def find_instance_by_alias(alias: str) -> dict | None:
@@ -62,201 +70,182 @@ def find_instance_by_alias(alias: str) -> dict | None:
     return None
 
 
-def create_instance(alias: str) -> dict:
-    print(f"{WAIT} Creating Connect instance '{alias}' (this takes 2-5 min) ...")
-    cc = connect_client()
-    try:
-        resp = cc.create_instance(
-            IdentityManagementType="CONNECT_MANAGED",
-            InstanceAlias=alias,
-            InboundCallsEnabled=True,
-            OutboundCallsEnabled=False,
-        )
-    except ClientError as e:
-        code = e.response["Error"].get("Code", "")
-        if code == "AccessDeniedException":
-            print(f"{FAIL} Workshop role lacks connect:CreateInstance permission.")
-            print("       Activate Fallback B (Browser-WebRTC pivot) — talk to user.")
-            raise SystemExit(2)
-        raise
-    instance_id = resp["Id"]
-    print(f"     instance id = {instance_id}, polling status ...")
-    # Poll for ACTIVE — typical ~2 min
-    for attempt in range(60):
-        time.sleep(10)
-        try:
-            d = cc.describe_instance(InstanceId=instance_id)["Instance"]
-            status = d.get("InstanceStatus")
-            print(f"     [{attempt*10:3d}s] status={status}")
-            if status == "ACTIVE":
-                return d
-            if status == "CREATION_FAILED":
-                print(f"{FAIL} Instance creation failed: {d.get('StatusReason')}")
-                raise SystemExit(2)
-        except ClientError as e:
-            if e.response["Error"].get("Code") == "ResourceNotFoundException":
-                continue
-            raise
-    print(f"{FAIL} Instance didn't reach ACTIVE within 10 min")
-    raise SystemExit(2)
-
-
 def ensure_instance() -> dict:
     found = find_instance_by_alias(INSTANCE_ALIAS)
     if found:
-        print(f"{OK} Connect instance already exists: {found['Id']} (status={found.get('InstanceStatus')})")
-        # If existing but not ACTIVE, wait
-        if found.get("InstanceStatus") != "ACTIVE":
-            cc = connect_client()
-            for _ in range(30):
-                time.sleep(5)
-                d = cc.describe_instance(InstanceId=found["Id"])["Instance"]
-                print(f"     polling existing instance... status={d.get('InstanceStatus')}")
-                if d.get("InstanceStatus") == "ACTIVE":
-                    return d
-            print(f"{FAIL} Existing instance not ACTIVE")
-            raise SystemExit(2)
+        print(f"{OK} Connect instance reused: {found['Id']} (status={found.get('InstanceStatus')})")
         return found
-    return create_instance(INSTANCE_ALIAS)
-
-
-def get_default_flow_id(instance_id: str) -> str:
-    """Find the default 'Sample inbound flow' as a placeholder for now."""
-    cc = connect_client()
-    paginator = cc.get_paginator("list_contact_flows")
-    for page in paginator.paginate(InstanceId=instance_id, ContactFlowTypes=["CONTACT_FLOW"]):
-        for f in page["ContactFlowSummaryList"]:
-            if f["Name"] == "Sample inbound flow (first contact experience)":
-                return f["Id"]
-            if f["Name"] == "Default customer queue":
-                return f["Id"]
-    # If no default found, return the first one
-    for page in paginator.paginate(InstanceId=instance_id, ContactFlowTypes=["CONTACT_FLOW"]):
-        for f in page["ContactFlowSummaryList"]:
-            return f["Id"]
-    raise RuntimeError("No default flow found")
-
-
-GREETING_FLOW_CONTENT = {
-    "Version": "2019-10-30",
-    "StartAction": "greeting",
-    "Metadata": {
-        "entryPointPosition": {"x": 40, "y": 40},
-        "ActionMetadata": {
-            "greeting": {"position": {"x": 240, "y": 40}},
-            "disconnect": {"position": {"x": 440, "y": 40}},
-        },
-    },
-    "Actions": [
-        {
-            "Identifier": "greeting",
-            "Type": "MessageParticipant",
-            "Parameters": {
-                "Text": "Hello from Atrium. This is a placeholder greeting. The voice agent is being wired up.",
-            },
-            "Transitions": {
-                "NextAction": "disconnect",
-                "Errors": [],
-                "Conditions": [],
-            },
-        },
-        {
-            "Identifier": "disconnect",
-            "Type": "DisconnectParticipant",
-            "Parameters": {},
-            "Transitions": {},
-        },
-    ],
-}
-
-
-def ensure_contact_flow(instance_id: str) -> str:
-    cc = connect_client()
-    # Search existing
-    paginator = cc.get_paginator("list_contact_flows")
-    for page in paginator.paginate(InstanceId=instance_id, ContactFlowTypes=["CONTACT_FLOW"]):
-        for f in page["ContactFlowSummaryList"]:
-            if f["Name"] == CONTACT_FLOW_NAME:
-                print(f"{OK} Contact flow '{CONTACT_FLOW_NAME}' already exists: {f['Id']}")
-                return f["Id"]
-    print(f"{WAIT} Creating contact flow '{CONTACT_FLOW_NAME}' ...")
-    resp = cc.create_contact_flow(
-        InstanceId=instance_id,
-        Name=CONTACT_FLOW_NAME,
-        Type="CONTACT_FLOW",
-        Description="Atrium inbound greeting; replaced by Lambda invocation in Stage 2",
-        Content=json.dumps(GREETING_FLOW_CONTENT),
+    raise SystemExit(
+        f"No Connect instance with alias '{INSTANCE_ALIAS}'. "
+        "Create one in the Connect console (one-time manual step) or restore "
+        "the create_instance flow from git history if your workshop role allows it."
     )
-    flow_id = resp["ContactFlowId"]
-    print(f"{OK} Contact flow created: {flow_id}")
-    return flow_id
 
 
 def find_claimed_number(instance_arn: str) -> dict | None:
     cc = connect_client()
     paginator = cc.get_paginator("list_phone_numbers_v2")
     for page in paginator.paginate(TargetArn=instance_arn):
-        for n in page["ListPhoneNumbersSummaryList"]:
-            return n  # Return first one if any
+        nums = page.get("ListPhoneNumbersSummaryList", [])
+        if nums:
+            return nums[0]
     return None
 
 
-def claim_phone_number(instance_arn: str) -> dict:
+def find_flow(instance_id: str, name: str) -> str | None:
     cc = connect_client()
-    print(f"{WAIT} Searching for available US DID numbers ...")
-    try:
-        avail = cc.search_available_phone_numbers(
-            TargetArn=instance_arn,
-            PhoneNumberCountryCode="US",
-            PhoneNumberType="DID",
-            MaxResults=5,
-        )
-    except ClientError as e:
-        code = e.response["Error"].get("Code", "")
-        if code == "AccessDeniedException":
-            print(f"{FAIL} Workshop role lacks connect:SearchAvailablePhoneNumbers")
-            raise SystemExit(3)
-        raise
-    candidates = avail.get("AvailableNumbersList", [])
-    if not candidates:
-        print(f"{FAIL} No DID numbers available — trying TOLL_FREE ...")
-        avail = cc.search_available_phone_numbers(
-            TargetArn=instance_arn,
-            PhoneNumberCountryCode="US",
-            PhoneNumberType="TOLL_FREE",
-            MaxResults=5,
-        )
-        candidates = avail.get("AvailableNumbersList", [])
-        if not candidates:
-            print(f"{FAIL} No US numbers available at all in this account")
-            raise SystemExit(3)
-    chosen = candidates[0]
-    print(f"     Claiming {chosen['PhoneNumber']} ({chosen['PhoneNumberType']}) ...")
-    try:
-        resp = cc.claim_phone_number(
-            TargetArn=instance_arn,
-            PhoneNumber=chosen["PhoneNumber"],
-            PhoneNumberDescription="Atrium demo line",
-        )
-    except ClientError as e:
-        code = e.response["Error"].get("Code", "")
-        if code == "AccessDeniedException":
-            print(f"{FAIL} Workshop role lacks connect:ClaimPhoneNumber — Fallback B needed")
-            raise SystemExit(3)
-        raise
+    paginator = cc.get_paginator("list_contact_flows")
+    for page in paginator.paginate(InstanceId=instance_id, ContactFlowTypes=["CONTACT_FLOW"]):
+        for f in page["ContactFlowSummaryList"]:
+            if f["Name"] == name:
+                return f["Id"]
+    return None
+
+
+def build_flow_content(
+    bot_id: str,
+    bot_alias_id: str,
+    aws_region: str,
+    company_id: str = DEFAULT_COMPANY_ID,
+) -> dict:
+    """Build the Lex-driven contact flow JSON.
+
+    Connect's contact-flow JSON uses the legacy `LexBot` parameter key even for
+    Lex V2 bots, with `{Name=botId, Region, Alias=botAliasId}`. The Lex V2
+    block, despite the legacy name, fully supports our bot.
+    """
     return {
-        "PhoneNumberId": resp["PhoneNumberId"],
-        "PhoneNumberArn": resp["PhoneNumberArn"],
-        "PhoneNumber": chosen["PhoneNumber"],
-        "PhoneNumberType": chosen["PhoneNumberType"],
+        "Version": "2019-10-30",
+        "StartAction": "set_voice",
+        "Metadata": {
+            "entryPointPosition": {"x": 40, "y": 40},
+            "ActionMetadata": {
+                "set_voice": {"position": {"x": 200, "y": 40}},
+                "set_attrs": {"position": {"x": 380, "y": 40}},
+                "engage": {"position": {"x": 560, "y": 40}},
+                "goodbye": {"position": {"x": 740, "y": 40}},
+                "err_msg": {"position": {"x": 560, "y": 240}},
+                "disconnect": {"position": {"x": 920, "y": 40}},
+            },
+        },
+        "Actions": [
+            {
+                "Identifier": "set_voice",
+                "Type": "UpdateContactTextToSpeechVoice",
+                "Parameters": {
+                    "TextToSpeechEngine": "generative",
+                    "TextToSpeechVoice": TTS_VOICE,
+                },
+                "Transitions": {
+                    "NextAction": "set_attrs",
+                    "Errors": [],
+                    "Conditions": [],
+                },
+            },
+            {
+                "Identifier": "set_attrs",
+                "Type": "UpdateContactAttributes",
+                "Parameters": {
+                    "Attributes": {"companyId": company_id},
+                    "TargetContact": "Current",
+                },
+                "Transitions": {
+                    "NextAction": "engage",
+                    "Errors": [
+                        {"NextAction": "engage", "ErrorType": "NoMatchingError"},
+                    ],
+                    "Conditions": [],
+                },
+            },
+            {
+                "Identifier": "engage",
+                "Type": "ConnectParticipantWithLexBot",
+                "Parameters": {
+                    "Text": GREETING,
+                    "LexBot": {
+                        "Name": bot_id,
+                        "Region": aws_region,
+                        "Alias": bot_alias_id,
+                    },
+                },
+                "Transitions": {
+                    "NextAction": "goodbye",
+                    "Errors": [
+                        {"NextAction": "err_msg", "ErrorType": "NoMatchingError"},
+                        {"NextAction": "goodbye", "ErrorType": "NoMatchingCondition"},
+                    ],
+                    "Conditions": [],
+                },
+            },
+            {
+                "Identifier": "goodbye",
+                "Type": "MessageParticipant",
+                "Parameters": {"Text": GOODBYE},
+                "Transitions": {
+                    "NextAction": "disconnect",
+                    "Errors": [],
+                    "Conditions": [],
+                },
+            },
+            {
+                "Identifier": "err_msg",
+                "Type": "MessageParticipant",
+                "Parameters": {"Text": ERROR_MSG},
+                "Transitions": {
+                    "NextAction": "disconnect",
+                    "Errors": [],
+                    "Conditions": [],
+                },
+            },
+            {
+                "Identifier": "disconnect",
+                "Type": "DisconnectParticipant",
+                "Parameters": {},
+                "Transitions": {},
+            },
+        ],
     }
 
 
-def map_number_to_flow(phone_number_id: str, flow_id: str, instance_id: str) -> None:
+def upsert_contact_flow(instance_id: str, content: dict) -> str:
     cc = connect_client()
-    print(f"{WAIT} Mapping number {phone_number_id} -> flow {flow_id} ...")
-    # Claim can take a few seconds to propagate — retry up to ~30s
-    last_err: Exception | None = None
+    flow_id = find_flow(instance_id, CONTACT_FLOW_NAME)
+    content_str = json.dumps(content)
+    if flow_id:
+        print(f"{WAIT} Updating existing contact flow {CONTACT_FLOW_NAME} ({flow_id}) ...")
+        cc.update_contact_flow_content(
+            InstanceId=instance_id,
+            ContactFlowId=flow_id,
+            Content=content_str,
+        )
+        print(f"{OK} Contact flow content updated")
+        return flow_id
+    print(f"{WAIT} Creating contact flow {CONTACT_FLOW_NAME} ...")
+    resp = cc.create_contact_flow(
+        InstanceId=instance_id,
+        Name=CONTACT_FLOW_NAME,
+        Type="CONTACT_FLOW",
+        Description="Atrium inbound — hands the call to the Lex receptionist bot.",
+        Content=content_str,
+    )
+    return resp["ContactFlowId"]
+
+
+def associate_lex_bot(instance_id: str, alias_arn: str) -> None:
+    cc = connect_client()
+    try:
+        cc.associate_bot(InstanceId=instance_id, LexV2Bot={"AliasArn": alias_arn})
+        print(f"{OK} Associated Lex bot alias with Connect instance")
+    except ClientError as e:
+        code = e.response["Error"].get("Code", "")
+        if code in ("ResourceConflictException", "DuplicateResourceException"):
+            print(f"{OK} Lex bot already associated with Connect instance")
+            return
+        raise
+
+
+def map_number_to_flow(phone_number_id: str, instance_id: str, flow_id: str) -> None:
+    cc = connect_client()
     for attempt in range(10):
         try:
             cc.associate_phone_number_contact_flow(
@@ -269,50 +258,58 @@ def map_number_to_flow(phone_number_id: str, flow_id: str, instance_id: str) -> 
         except ClientError as e:
             code = e.response["Error"].get("Code", "")
             if code in ("ResourceNotFoundException", "ResourceInUseException"):
-                last_err = e
                 print(f"     retry {attempt+1}/10 in 5s (got {code})")
                 time.sleep(5)
                 continue
             raise
-    raise RuntimeError(f"map_number_to_flow failed after retries: {last_err}")
+    raise RuntimeError("map_number_to_flow failed after retries")
 
 
 def main() -> int:
     state = load_state()
+    lex_state = load_lex_state()
+    bot_alias_arn = lex_state["BotAliasArn"]
+    lex_bot_id = lex_state["BotId"]
+    lex_alias_id = lex_state["BotAliasId"]
+    aws_region = lex_state.get("Region", region())
     print(f"=== Atrium Connect provisioning (region={region()}, account={get_account_id()}) ===")
+    print(f"     Lex bot: {lex_bot_id} / alias: {lex_alias_id}")
 
     instance = ensure_instance()
     instance_id = instance["Id"]
     instance_arn = instance["Arn"]
     print(f"{OK} Instance ACTIVE: {instance_arn}")
 
-    flow_id = ensure_contact_flow(instance_id)
+    associate_lex_bot(instance_id, bot_alias_arn)
+
+    flow_id = upsert_contact_flow(
+        instance_id,
+        build_flow_content(lex_bot_id, lex_alias_id, aws_region),
+    )
 
     number_info = find_claimed_number(instance_arn)
-    if number_info:
-        print(f"{OK} Phone number already claimed: {number_info.get('PhoneNumber')}")
-        number_info = {
-            "PhoneNumberId": number_info["PhoneNumberId"],
-            "PhoneNumberArn": number_info["PhoneNumberArn"],
-            "PhoneNumber": number_info.get("PhoneNumber"),
-            "PhoneNumberType": number_info.get("PhoneNumberType"),
-        }
-    else:
-        number_info = claim_phone_number(instance_arn)
-        print(f"{OK} Claimed: {number_info['PhoneNumber']} ({number_info['PhoneNumberType']})")
+    if not number_info:
+        raise SystemExit(
+            "No phone number claimed on the Connect instance. Claim one in the console, "
+            "then re-run this script."
+        )
+    phone_number_id = number_info["PhoneNumberId"]
+    print(f"{OK} Phone number: {number_info.get('PhoneNumber')} ({phone_number_id})")
+    map_number_to_flow(phone_number_id, instance_id, flow_id)
 
-    map_number_to_flow(number_info["PhoneNumberId"], flow_id, instance_id)
-
-    state = {
+    state.update({
         "InstanceId": instance_id,
         "InstanceArn": instance_arn,
         "InstanceAlias": INSTANCE_ALIAS,
         "ContactFlowId": flow_id,
         "ContactFlowName": CONTACT_FLOW_NAME,
-        **number_info,
+        "PhoneNumber": number_info.get("PhoneNumber"),
+        "PhoneNumberId": phone_number_id,
+        "PhoneNumberArn": number_info.get("PhoneNumberArn"),
+        "BotAliasArn": bot_alias_arn,
         "Region": region(),
         "AccountId": get_account_id(),
-    }
+    })
     save_state(state)
     print(f"\n=== Done. State written to {STATE_FILE} ===")
     print(json.dumps(state, indent=2))

@@ -1,23 +1,12 @@
-"""Atrium Input Agent Lambda — Stage 2 skeleton (WebRTC architecture).
+"""Atrium Input Agent Lambda — event-shape dispatcher.
 
-Invoked by the **audio API Gateway WebSocket** ($connect / $message / $disconnect
-routes). At Stage 2 this is just an echo skeleton:
-  - $connect:    log the new connection, return a 200 OK greeting payload
-  - $message:    log the message size, send back a placeholder ack
-  - $disconnect: log the close, no-op
-
-Stage 3 wires the real audio loop:
-  - $message PCM frames → Amazon Transcribe Streaming
-  - Final transcripts   → Bedrock Claude Sonnet 4.6 (Converse + tool-use)
-  - Claude text reply   → Amazon Polly Neural (synthesize_speech) → MP3 frames
-                          posted back via apigatewaymanagementapi.post_to_connection
-
-Allow-list note: this Lambda intentionally does NOT use Amazon Connect or
-Bedrock Nova Sonic — neither is on the hackathon allow-list. The voice loop
-is Transcribe + Claude Sonnet 4.6 + Polly, all three explicitly allowed.
-
-Event shape (API GW WS): see
-https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-websocket-api-mapping-template-reference.html
+Two callers wire into this Lambda:
+  1. **Amazon Lex V2** (CodeHook from a Connect contact flow's Lex GetCustomerInput
+     block). This is the live PSTN path. Event has `sessionId` + `inputTranscript`
+     and is routed to lex_handler.handle_lex.
+  2. **API Gateway WebSocket** ($connect / $message / $disconnect routes) — the
+     stage-2 echo skeleton for the future browser-mic Call-now path. Kept so
+     existing WS wiring keeps responding while voice work lands.
 """
 from __future__ import annotations
 
@@ -32,32 +21,69 @@ PERSONA_NAME = os.environ.get("PERSONA_NAME", "Sarah")
 COMPANY_NAME = os.environ.get("COMPANY_NAME", "Sparkle Cleaning")
 
 
-def lambda_handler(event, context):
-    logger.info("WS_EVENT %s", json.dumps(event, default=str)[:2000])
+def _is_lex_event(event: dict) -> bool:
+    return (
+        isinstance(event, dict)
+        and "inputTranscript" in event
+        and "sessionState" in event
+        and event.get("bot") is not None
+    )
 
+
+def lambda_handler(event, context):
+    logger.info("EVENT_TYPE keys=%s", list(event.keys()) if isinstance(event, dict) else type(event).__name__)
+
+    if _is_lex_event(event):
+        # Lazy import: only pull boto3 + heavy modules when actually needed
+        from lex_handler import handle_lex
+        try:
+            return handle_lex(event)
+        except Exception:
+            logger.exception("LEX_HANDLER_ERROR")
+            return _lex_error_response(event)
+
+    return _ws_skeleton(event)
+
+
+def _lex_error_response(event: dict) -> dict:
+    session_state = event.get("sessionState") or {}
+    attrs = dict(session_state.get("sessionAttributes") or {})
+    intent = (session_state.get("intent") or {}).get("name", "FallbackIntent")
+    return {
+        "sessionState": {
+            "sessionAttributes": attrs,
+            "dialogAction": {"type": "ElicitIntent"},
+            "intent": {"name": intent, "state": "InProgress"},
+        },
+        "messages": [
+            {
+                "contentType": "PlainText",
+                "content": "Sorry, I am having trouble. Could you say that again?",
+            }
+        ],
+    }
+
+
+def _ws_skeleton(event: dict) -> dict:
     request_context = event.get("requestContext", {}) or {}
     route_key = request_context.get("routeKey", "unknown")
     connection_id = request_context.get("connectionId", "unknown")
 
     if route_key == "$connect":
-        logger.info("STAGE2_CONNECT connection_id=%s", connection_id)
+        logger.info("WS_CONNECT connection_id=%s", connection_id)
         return {"statusCode": 200, "body": "connected"}
 
     if route_key == "$disconnect":
-        logger.info("STAGE2_DISCONNECT connection_id=%s", connection_id)
+        logger.info("WS_DISCONNECT connection_id=%s", connection_id)
         return {"statusCode": 200, "body": "disconnected"}
 
-    # $default / $message
     body_raw = event.get("body", "") or ""
-    logger.info(
-        "STAGE2_MESSAGE connection_id=%s bytes=%d",
-        connection_id, len(body_raw),
-    )
+    logger.info("WS_MESSAGE connection_id=%s bytes=%d", connection_id, len(body_raw))
 
     placeholder = (
         f"Hello, this is {PERSONA_NAME} from {COMPANY_NAME}. "
-        f"This is the Atrium input agent Lambda speaking — stage 2, WebRTC architecture. "
-        f"Stage 3 will replace this echo with a live Transcribe + Claude + Polly loop."
+        f"WebSocket browser-mic path is still a stage-2 echo skeleton — the live "
+        f"voice path is via Amazon Lex from the Connect contact flow."
     )
     return {
         "statusCode": 200,
@@ -65,5 +91,5 @@ def lambda_handler(event, context):
     }
 
 
-# Keep the legacy name `handler` as an alias so existing wiring doesn't break.
+# Backwards-compat alias
 handler = lambda_handler
