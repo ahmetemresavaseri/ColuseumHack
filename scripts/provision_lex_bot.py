@@ -33,7 +33,7 @@ BOT_NAME = "atrium-input-agent"
 LOCALE_ID = "en_US"
 ALIAS_NAME = "live"
 INTENT_NAME = "CollectBooking"
-SLOT_NAMES = ("when", "what", "area", "rooms", "urgency", "email")
+SLOT_NAMES = ("when", "what", "area", "rooms", "urgency", "location")
 LEX_ROLE_NAME = "AWSServiceRoleForLexV2Bots"
 LEX_ROLE_ARN = f"arn:aws:iam::{{account_id}}:role/aws-service-role/lexv2.amazonaws.com/{LEX_ROLE_NAME}"
 

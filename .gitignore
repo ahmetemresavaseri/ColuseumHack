@@ -1,17 +1,6 @@
 # --- Local environment / secrets ---
-.env
-.env.local
-.env.local.*
-.env.*.local
-*.pem
-*.key
 .aws/
 .aws-*
-
-# --- Google Service Account keys ---
-**/service-account*.json
-**/google-credentials*.json
-local/credentials/
 local/team_lambda_ref/
 
 # --- Python ---

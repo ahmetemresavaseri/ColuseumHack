@@ -1,4 +1,8 @@
-"""Shared boto3 client factories + identity helpers for the Atrium project."""
+"""Shared boto3 client factories + identity helpers for the Atrium project.
+
+The PSTN voice path uses Amazon Connect -> Amazon Lex V2 -> Lambda CodeHook ->
+Bedrock. Client factories for those services are exposed below.
+"""
 from __future__ import annotations
 
 import os
@@ -53,8 +57,13 @@ def bedrock_runtime():
 
 
 @lru_cache(maxsize=1)
-def connect_client():
-    return boto3.client("connect", config=_default_config)
+def polly():
+    return boto3.client("polly", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def transcribe_streaming():
+    return boto3.client("transcribe-streaming", config=_default_config)
 
 
 @lru_cache(maxsize=1)
@@ -70,3 +79,28 @@ def iam():
 @lru_cache(maxsize=1)
 def logs():
     return boto3.client("logs", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def apigatewayv2():
+    return boto3.client("apigatewayv2", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def dynamodb():
+    return boto3.client("dynamodb", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def connect_client():
+    return boto3.client("connect", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def lex_models():
+    return boto3.client("lexv2-models", config=_default_config)
+
+
+@lru_cache(maxsize=1)
+def lex_runtime():
+    return boto3.client("lexv2-runtime", config=_default_config)

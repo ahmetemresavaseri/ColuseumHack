@@ -11,15 +11,13 @@
     "rooms",
     "bathrooms",
     "urgency",
-    "email"
+    "location"
   ],
 
   "optional_slots": [
     "condition",
     "addons",
-    "preferred_date",
-    "postcode",
-    "where"
+    "preferred_date"
   ],
 
   "default_values": {
@@ -307,10 +305,8 @@
     "urgency": "standard",
     "condition": "normal",
     "addons": ["oven", "blinds"],
-    "email": "customer@example.com",
-    "preferred_date": "2026-05-29",
-    "postcode": "8001",
-    "where": "8001 Zurich"
+    "location": "Bahnhofstrasse 12, 8001 Zürich",
+    "preferred_date": "2026-05-29"
   },
 
   "photo_rules": {

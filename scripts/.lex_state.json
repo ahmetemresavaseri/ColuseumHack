@@ -1,0 +1,12 @@
+{
+  "BotId": "IIMAZWZKAB",
+  "BotName": "atrium-receptionist",
+  "BotAliasId": "ZZWKB7NWLW",
+  "BotAliasName": "atrium-live",
+  "BotAliasArn": "arn:aws:lex:us-west-2:160659473263:bot-alias/IIMAZWZKAB/ZZWKB7NWLW",
+  "BotVersion": "2",
+  "LocaleId": "en_US",
+  "LambdaCodeHookArn": "arn:aws:lambda:us-west-2:160659473263:function:atrium-input-agent",
+  "BotRoleArn": "arn:aws:iam::160659473263:role/atrium-lex-bot-role",
+  "Region": "us-west-2"
+}

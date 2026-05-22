@@ -1,2 +1,4 @@
-# Lambda runtime ships boto3, so it's not pinned here for Stage 2.
-# Stage 3 will add audio + KVS deps.
+# Lambda runtime ships boto3, so it's not pinned here.
+# Google Calendar tool (check_availability / book_appointment) needs:
+google-auth>=2.29.0
+google-api-python-client>=2.130.0

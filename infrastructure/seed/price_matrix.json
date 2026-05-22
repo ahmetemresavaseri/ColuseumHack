@@ -2,28 +2,28 @@
   {
     "companyId": "glanz-ag",
     "serviceType": "MOVE_OUT_CLEANING",
-    "baseFee": 120,
-    "ratePerSquareMeter": 4.5,
-    "roomSurcharge": 15,
-    "urgentMultiplier": 1.25,
+    "baseFee": 350,
+    "ratePerSquareMeter": 12.5,
+    "roomSurcharge": 45,
+    "urgentMultiplier": 1.4,
     "currency": "CHF"
   },
   {
     "companyId": "glanz-ag",
     "serviceType": "OFFICE_CLEANING",
-    "baseFee": 90,
-    "ratePerSquareMeter": 3.2,
-    "roomSurcharge": 10,
-    "urgentMultiplier": 1.2,
+    "baseFee": 250,
+    "ratePerSquareMeter": 8.5,
+    "roomSurcharge": 30,
+    "urgentMultiplier": 1.3,
     "currency": "CHF"
   },
   {
     "companyId": "glanz-ag",
     "serviceType": "WINDOW_CLEANING",
-    "baseFee": 80,
-    "ratePerSquareMeter": 5.0,
+    "baseFee": 220,
+    "ratePerSquareMeter": 14.0,
     "roomSurcharge": 0,
-    "urgentMultiplier": 1.2,
+    "urgentMultiplier": 1.3,
     "currency": "CHF"
   }
 ]

@@ -139,7 +139,7 @@ Each tenant gets a metadata-filtered slice of a shared Bedrock Knowledge Base.
 ### DynamoDB (on-demand)
 
 - **`Calls`** — live phone session state. `PK = callId`, `SK = turn#<seq>` for transcript chunks, `SK = meta` for summary. Attributes include `transcriptChunk`, `speaker`, `citations[]`.
-- **`Bookings`** — durable booking record. `PK = bookingId` (UUIDv7), `SK = current`. Attributes: `slots{when, what, area, rooms, urgency, email}`, `brain{serviceType, crew, hours, price, currency, ...}`. GSI1 on `companyId + updatedAt` for tenant-scoped queries.
+- **`Bookings`** — durable booking record. `PK = bookingId` (UUIDv7), `SK = current`. Attributes: `slots{when, what, area, rooms, urgency, location}`, `brain{serviceType, crew, hours, price, currency, ...}`. GSI1 on `companyId + updatedAt` for tenant-scoped queries.
 - **`Companies`** — tenant config. Attributes: `name`, `phoneNumber`, `priceMatrix`, `voicePersonaPrompt`, `kbId`, `locale`, `currency`, `unitSystem`, `timezone`. All locale/currency/unit handling is driven from here — the rest of the stack is locale-agnostic.
 - **`Crews`** — small seed table for the Brain to allocate from.
 

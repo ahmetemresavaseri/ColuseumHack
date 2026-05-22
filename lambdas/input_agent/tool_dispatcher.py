@@ -27,6 +27,15 @@ from feasibility import assess as assess_feasibility
 from kb import kb_lookup
 from slot_adapter import save_slot as save_slot_adapter
 
+try:
+    from calendar_tool import (
+        book_appointment as _gcal_book,
+        check_availability as _gcal_check,
+    )
+except Exception:  # pragma: no cover - google libs not vendored yet
+    _gcal_book = None
+    _gcal_check = None
+
 logger = logging.getLogger(__name__)
 
 Tool = Callable[[dict[str, Any]], dict[str, Any]]
@@ -83,6 +92,31 @@ def _end_call(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _check_availability(args: dict[str, Any]) -> dict[str, Any]:
+    if _gcal_check is None:
+        return {"status": "calendar_not_configured", "slots": [],
+                "reason": "google libs missing"}
+    return _gcal_check(
+        date_iso=args.get("date"),
+        duration_minutes=int(args.get("durationMinutes") or 120),
+        calendar_id=args.get("calendarId"),
+        max_slots=int(args.get("maxSlots") or 3),
+    )
+
+
+def _book_appointment(args: dict[str, Any]) -> dict[str, Any]:
+    if _gcal_book is None:
+        return {"status": "calendar_not_configured", "reason": "google libs missing"}
+    return _gcal_book(
+        start_iso=args["start"],
+        end_iso=args["end"],
+        summary=args.get("summary", "Atrium booking"),
+        location=args.get("location", ""),
+        description=args.get("description", ""),
+        calendar_id=args.get("calendarId"),
+    )
+
+
 def _feasibility_assessment(args: dict[str, Any]) -> dict[str, Any]:
     """Standalone feasibility check; doesn't need Brain Lambda.
 
@@ -103,6 +137,8 @@ TOOLS: dict[str, Tool] = {
     "save_slot": _save_slot,
     "compute_price": _compute_price,
     "feasibility_assessment": _feasibility_assessment,
+    "check_availability": _check_availability,
+    "book_appointment": _book_appointment,
     "end_call": _end_call,
 }
 

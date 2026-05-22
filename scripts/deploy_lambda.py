@@ -1,21 +1,27 @@
-"""Stage 2 — deploy the Atrium Input Agent Lambda and wire it into Connect.
+"""Deploy the Atrium Input Agent Lambda.
 
 Idempotent:
   - Creates IAM role atrium-input-agent-role if missing, ensures policies.
   - Packages lambdas/input_agent/ as ZIP and creates/updates the function.
-  - Adds Lambda resource permission so Connect can invoke it.
-  - Associates the Lambda with the Connect instance (so it appears in the
-    "Invoke Lambda" block dropdown).
-  - Rewrites the atrium-inbound contact flow to: InvokeLambda -> speak greeting -> disconnect.
+  - Grants Amazon Lex permission to invoke the function (idempotent).
 
-Reads scripts/.connect_state.json from Stage 1. Updates it with LambdaFunctionArn.
+Wiring: the function is the CodeHook target of an Amazon Lex V2 bot, which is
+in turn invoked from the Connect contact flow's GetCustomerInput block. Run
+`scripts/provision_lex.py` after deploy to provision the bot and wire the
+arn, then `scripts/provision_connect.py` to install the contact flow.
+
+State is written to `scripts/.deploy_state.json`.
 """
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -24,18 +30,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from botocore.exceptions import ClientError
 
-from aws_helpers import connect_client, get_account_id, iam, lambda_client, region
+from aws_helpers import get_account_id, iam, lambda_client, region
 
 ROOT = Path(__file__).resolve().parent.parent
 LAMBDA_DIR = ROOT / "lambdas" / "input_agent"
-STATE_FILE = Path(__file__).parent / ".connect_state.json"
+STATE_FILE = Path(__file__).parent / ".deploy_state.json"
+LEGACY_STATE_FILE = Path(__file__).parent / ".connect_state.json"
 
 FUNCTION_NAME = "atrium-input-agent"
 ROLE_NAME = "atrium-input-agent-role"
 RUNTIME = "python3.13"
 HANDLER = "handler.lambda_handler"
 MEMORY_MB = 1024
-TIMEOUT_S = 8  # Connect's hard ceiling for Lambda invocations from contact flow
+# Lex CodeHook invocations are short turns (one round-trip per caller utterance).
+# Bedrock Converse with tool-use can take ~3-8s; 30s is a safe ceiling that
+# stays well under Lex's 30s synchronous CodeHook limit.
+TIMEOUT_S = 30
 
 ASSUME_ROLE_DOC = {
     "Version": "2012-10-17",
@@ -46,6 +56,12 @@ ASSUME_ROLE_DOC = {
     }],
 }
 
+# IAM policy for the Lex-CodeHook path:
+#   - Bedrock Converse + KB Retrieve   (the LLM turn loop)
+#   - DynamoDB                          (slot persistence, company config, calls)
+#   - Lambda invoke                     (Brain Lambda for compute_price)
+# Polly + Transcribe perms are kept for the future browser-mic streaming path
+# but unused on the Lex path (Lex handles ASR + TTS).
 INLINE_POLICY_DOC = {
     "Version": "2012-10-17",
     "Statement": [
@@ -55,32 +71,68 @@ INLINE_POLICY_DOC = {
             "Action": [
                 "bedrock:InvokeModel",
                 "bedrock:InvokeModelWithResponseStream",
-                "bedrock:InvokeModelWithBidirectionalStream",
                 "bedrock:Converse",
                 "bedrock:ConverseStream",
             ],
             "Resource": "*",
         },
         {
-            "Sid": "KinesisVideoStreams",
+            "Sid": "BedrockKnowledgeBaseRetrieve",
             "Effect": "Allow",
             "Action": [
-                "kinesisvideo:DescribeStream",
-                "kinesisvideo:GetMedia",
-                "kinesisvideo:GetDataEndpoint",
-                "kinesisvideo:PutMedia",
-                "kinesisvideo:GetHLSStreamingSessionURL",
+                "bedrock:Retrieve",
+                "bedrock:RetrieveAndGenerate",
             ],
             "Resource": "*",
         },
         {
-            "Sid": "ConnectUpdates",
+            "Sid": "TranscribeStreaming",
             "Effect": "Allow",
             "Action": [
-                "connect:UpdateContactAttributes",
-                "connect:GetContactAttributes",
-                "connect:StopContact",
+                "transcribe:StartStreamTranscription",
+                "transcribe:StartStreamTranscriptionWebSocket",
             ],
+            "Resource": "*",
+        },
+        {
+            "Sid": "PollyNeural",
+            "Effect": "Allow",
+            "Action": [
+                "polly:SynthesizeSpeech",
+                "polly:DescribeVoices",
+            ],
+            "Resource": "*",
+        },
+        {
+            "Sid": "DynamoDB",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:Query",
+                "dynamodb:BatchGetItem",
+                "dynamodb:BatchWriteItem",
+            ],
+            "Resource": "*",
+        },
+        {
+            "Sid": "ApiGatewayWebSocketPush",
+            "Effect": "Allow",
+            "Action": ["execute-api:ManageConnections"],
+            "Resource": "arn:aws:execute-api:*:*:*/@connections/*",
+        },
+        {
+            "Sid": "InvokeBrainLambda",
+            "Effect": "Allow",
+            "Action": ["lambda:InvokeFunction"],
+            "Resource": "*",
+        },
+        {
+            "Sid": "EventBridgeLog",
+            "Effect": "Allow",
+            "Action": ["events:PutEvents"],
             "Resource": "*",
         },
     ],
@@ -92,9 +144,12 @@ FAIL = "[FAIL]"
 
 
 def load_state() -> dict:
-    if not STATE_FILE.exists():
-        raise SystemExit(f"{FAIL} Run provision_connect.py first — no state at {STATE_FILE}")
-    return json.loads(STATE_FILE.read_text())
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text())
+    if LEGACY_STATE_FILE.exists():
+        print(f"{WAIT} Found legacy {LEGACY_STATE_FILE.name} — Connect wiring will be ignored.")
+        return json.loads(LEGACY_STATE_FILE.read_text())
+    return {}
 
 
 def save_state(state: dict) -> None:
@@ -113,37 +168,128 @@ def ensure_role() -> str:
         r = i.create_role(
             RoleName=ROLE_NAME,
             AssumeRolePolicyDocument=json.dumps(ASSUME_ROLE_DOC),
-            Description="Execution role for Atrium Input Agent Lambda",
+            Description="Execution role for Atrium Input Agent Lambda (WebRTC architecture)",
         )
         print(f"{OK} IAM role created: {r['Role']['Arn']}")
 
     arn = r["Role"]["Arn"]
 
-    # Managed policy for basic CloudWatch Logs
     i.attach_role_policy(
         RoleName=ROLE_NAME,
         PolicyArn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
     )
-    # Inline policy for bedrock + KVS + connect
     i.put_role_policy(
         RoleName=ROLE_NAME,
         PolicyName="atrium-runtime",
         PolicyDocument=json.dumps(INLINE_POLICY_DOC),
     )
-    print(f"{OK} IAM policies attached")
+    print(f"{OK} IAM policies attached (Bedrock + Transcribe + Polly + DynamoDB + API GW WS)")
     return arn
 
 
+def _pip_install_requirements(dest: Path) -> None:
+    """Install requirements.txt into `dest` so they ship inside the Lambda zip."""
+    req = LAMBDA_DIR / "requirements.txt"
+    if not req.exists():
+        return
+    # Skip if the file is effectively empty (only comments / blank lines).
+    has_pkg = any(
+        line.strip() and not line.strip().startswith("#")
+        for line in req.read_text(encoding="utf-8").splitlines()
+    )
+    if not has_pkg:
+        return
+
+    print(f"{WAIT} pip install -r requirements.txt -> {dest.name}/ ...")
+    cmd = [
+        sys.executable, "-m", "pip", "install",
+        "-r", str(req),
+        "-t", str(dest),
+        "--quiet", "--no-compile",
+        # Lambda Python 3.13 runs Linux x86_64; force matching wheels.
+        "--platform", "manylinux2014_x86_64",
+        "--only-binary=:all:",
+        "--python-version", "3.13",
+        "--implementation", "cp",
+        "--upgrade",
+    ]
+    try:
+        subprocess.check_call(cmd)
+    except subprocess.CalledProcessError as exc:
+        # Fall back to a permissive install if cross-platform wheel pick fails
+        # (e.g. dev box on macOS arm64 with no manylinux wheel cached).
+        print(f"{WAIT} cross-platform pip failed ({exc}); retrying without platform pinning")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "-r", str(req), "-t", str(dest),
+            "--quiet", "--no-compile", "--upgrade",
+        ])
+
+
 def package_zip() -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+    with tempfile.TemporaryDirectory(prefix="atrium-input-agent-") as tmp:
+        build_dir = Path(tmp)
+        # 1. Copy the .py sources
         for src in LAMBDA_DIR.rglob("*.py"):
-            arcname = src.relative_to(LAMBDA_DIR).as_posix()
-            z.write(src, arcname)
+            rel = src.relative_to(LAMBDA_DIR)
+            dst = build_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+        # 2. Install runtime deps alongside the sources
+        _pip_install_requirements(build_dir)
+
+        # 3. Zip the build dir
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for path in build_dir.rglob("*"):
+                if path.is_file():
+                    arc = path.relative_to(build_dir).as_posix()
+                    # Trim pip metadata noise to keep the zip small.
+                    if "/__pycache__/" in f"/{arc}/" or arc.endswith(".pyc"):
+                        continue
+                    z.write(path, arc)
+
     buf.seek(0)
     data = buf.read()
-    print(f"{OK} Packaged {len(data)} bytes from {LAMBDA_DIR}")
+    print(f"{OK} Packaged {len(data)} bytes from {LAMBDA_DIR} (+ vendored deps)")
     return data
+
+
+def _load_calendar_env() -> dict[str, str]:
+    """Read local Google Calendar config and shape it for Lambda env vars.
+
+    Looks for:
+      - local/credentials/service-account.json  (gitignored)  → GOOGLE_SA_JSON_B64
+      - local/.env CALENDAR_ID_CREW_ZH_1                       → GOOGLE_CALENDAR_ID
+    Silently skips missing pieces so deploys still work without calendar wiring.
+    """
+    env: dict[str, str] = {}
+    sa_path = ROOT / "local" / "credentials" / "service-account.json"
+    if sa_path.exists():
+        try:
+            raw = sa_path.read_bytes()
+            env["GOOGLE_SA_JSON_B64"] = base64.b64encode(raw).decode("ascii")
+            print(f"{OK} Bundled Google service-account JSON via env var ({len(raw)} bytes)")
+        except Exception as exc:
+            print(f"{WAIT} skipped service-account.json: {exc}")
+    else:
+        print(f"{WAIT} no service-account.json at {sa_path} — calendar tool will soft-fail")
+
+    dotenv_path = ROOT / "local" / ".env"
+    if dotenv_path.exists():
+        for line in dotenv_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if key == "CALENDAR_ID_CREW_ZH_1" and value and "GOOGLE_CALENDAR_ID" not in env:
+                env["GOOGLE_CALENDAR_ID"] = value
+                print(f"{OK} GOOGLE_CALENDAR_ID set from local/.env")
+
+    env.setdefault("ATRIUM_TIMEZONE", "Europe/Zurich")
+    return env
 
 
 def function_exists(name: str) -> bool:
@@ -167,10 +313,15 @@ def wait_active(name: str, timeout: int = 60) -> None:
 
 def deploy_function(role_arn: str, zip_bytes: bytes) -> str:
     lc = lambda_client()
+    env_vars = _load_calendar_env()
     if function_exists(FUNCTION_NAME):
         print(f"{WAIT} Updating existing function {FUNCTION_NAME} ...")
         lc.update_function_code(FunctionName=FUNCTION_NAME, ZipFile=zip_bytes)
         wait_active(FUNCTION_NAME)
+        # Merge so we don't clobber other env vars set out-of-band.
+        existing = (lc.get_function_configuration(FunctionName=FUNCTION_NAME)
+                    .get("Environment", {}).get("Variables", {})) or {}
+        merged = {**existing, **env_vars}
         lc.update_function_configuration(
             FunctionName=FUNCTION_NAME,
             Runtime=RUNTIME,
@@ -178,11 +329,11 @@ def deploy_function(role_arn: str, zip_bytes: bytes) -> str:
             Role=role_arn,
             Timeout=TIMEOUT_S,
             MemorySize=MEMORY_MB,
+            Environment={"Variables": merged},
         )
         wait_active(FUNCTION_NAME)
     else:
         print(f"{WAIT} Creating function {FUNCTION_NAME} ...")
-        # IAM eventual consistency: role can take a few seconds to be assumable
         for attempt in range(12):
             try:
                 lc.create_function(
@@ -193,7 +344,8 @@ def deploy_function(role_arn: str, zip_bytes: bytes) -> str:
                     Code={"ZipFile": zip_bytes},
                     Timeout=TIMEOUT_S,
                     MemorySize=MEMORY_MB,
-                    Description="Atrium Input Agent — Connect <-> Nova Sonic bridge",
+                    Description="Atrium Input Agent — Lex CodeHook (Bedrock + Google Calendar)",
+                    Environment={"Variables": env_vars} if env_vars else {"Variables": {}},
                 )
                 break
             except ClientError as e:
@@ -209,175 +361,49 @@ def deploy_function(role_arn: str, zip_bytes: bytes) -> str:
     return arn
 
 
-def allow_connect_invoke(function_arn: str, instance_arn: str) -> None:
-    lc = lambda_client()
-    statement_id = "AllowConnectInvoke"
-    try:
-        lc.add_permission(
-            FunctionName=FUNCTION_NAME,
-            StatementId=statement_id,
-            Action="lambda:InvokeFunction",
-            Principal="connect.amazonaws.com",
-            SourceArn=instance_arn,
-        )
-        print(f"{OK} Lambda resource policy: Connect can invoke")
-    except ClientError as e:
-        if e.response["Error"].get("Code") == "ResourceConflictException":
-            print(f"{OK} Lambda resource policy already exists")
-        else:
-            raise
-
-
-def associate_with_connect(function_arn: str, instance_id: str) -> None:
-    cc = connect_client()
-    try:
-        cc.associate_lambda_function(InstanceId=instance_id, FunctionArn=function_arn)
-        print(f"{OK} Lambda associated with Connect instance")
-    except ClientError as e:
-        if e.response["Error"].get("Code") == "ResourceConflictException":
-            print(f"{OK} Lambda already associated with Connect instance")
-        else:
-            raise
-
-
-def build_stage2_flow_content(lambda_arn: str, lex_bot_alias_arn: str | None = None) -> dict:
-    """Phase 1 contact flow:
-
-      InvokeLambda (bootstrap call/booking, return greeting + IDs)
-        → SetAttributes (lift the External attrs into contact attributes)
-        → MessageParticipant (speak greeting)
-        → if Lex bot alias configured:
-            GetCustomerInput → Lex bot → loops until intent is fulfilled
-          else: skip straight to disconnect
-        → Disconnect
-    """
-    actions = [
-        {
-            "Identifier": "invoke",
-            "Type": "InvokeLambdaFunction",
-            "Parameters": {
-                "LambdaFunctionARN": lambda_arn,
-                "InvocationTimeLimitSeconds": "8",
-            },
-            "Transitions": {
-                "NextAction": "speak",
-                "Errors": [{"NextAction": "speak_err", "ErrorType": "NoMatchingError"}],
-            },
-        },
-        {
-            "Identifier": "speak",
-            "Type": "MessageParticipant",
-            "Parameters": {"Text": "$.External.greeting"},
-            "Transitions": {
-                "NextAction": "lex_input" if lex_bot_alias_arn else "disconnect",
-            },
-        },
-    ]
-    if lex_bot_alias_arn:
-        actions.append(
-            {
-                "Identifier": "lex_input",
-                "Parameters": {
-                    "Text": "How can I help you?",
-                    "LexV2Bot": {"AliasArn": lex_bot_alias_arn},
-                },
-                "Transitions": {
-                    "NextAction": "disconnect",
-                    "Errors": [
-                        {"NextAction": "disconnect", "ErrorType": "NoMatchingError"},
-                        {"NextAction": "disconnect", "ErrorType": "NoMatchingCondition"},
-                    ],
-                    "Conditions": [],
-                },
-                "Type": "ConnectParticipantWithLexBot",
-            }
-        )
-    actions.append(
-        {
-            "Identifier": "speak_err",
-            "Type": "MessageParticipant",
-            "Parameters": {
-                "Text": "Sorry, the agent is not available right now. Please try again later.",
-            },
-            "Transitions": {"NextAction": "disconnect"},
-        }
-    )
-    actions.append(
-        {
-            "Identifier": "disconnect",
-            "Type": "DisconnectParticipant",
-            "Parameters": {},
-            "Transitions": {},
-        }
-    )
-    return {
-        "Version": "2019-10-30",
-        "StartAction": "invoke",
-        "Metadata": {
-            "entryPointPosition": {"x": 40, "y": 40},
-            "ActionMetadata": {
-                "invoke": {"position": {"x": 240, "y": 40}},
-                "speak": {"position": {"x": 440, "y": 40}},
-                "lex_input": {"position": {"x": 640, "y": 40}},
-                "speak_err": {"position": {"x": 440, "y": 240}},
-                "disconnect": {"position": {"x": 840, "y": 40}},
-            },
-        },
-        "Actions": actions,
-    }
-
-
-def update_contact_flow(
-    instance_id: str,
-    flow_id: str,
-    lambda_arn: str,
-    lex_bot_alias_arn: str | None = None,
-) -> None:
-    cc = connect_client()
-    content = build_stage2_flow_content(lambda_arn, lex_bot_alias_arn)
-    cc.update_contact_flow_content(
-        InstanceId=instance_id,
-        ContactFlowId=flow_id,
-        Content=json.dumps(content),
-    )
-    suffix = " → Lex" if lex_bot_alias_arn else ""
-    print(f"{OK} Contact flow updated: Lambda greeting{suffix} → disconnect")
-
-
 def main() -> int:
     state = load_state()
-    instance_id = state["InstanceId"]
-    instance_arn = state["InstanceArn"]
-    flow_id = state["ContactFlowId"]
-
     print(f"=== Deploying {FUNCTION_NAME} (account={get_account_id()}, region={region()}) ===")
+    print("    Architecture: Connect contact flow -> Lex GetCustomerInput -> Lambda CodeHook (this fn)")
     role_arn = ensure_role()
     zip_bytes = package_zip()
     function_arn = deploy_function(role_arn, zip_bytes)
-    allow_connect_invoke(function_arn, instance_arn)
-    associate_with_connect(function_arn, instance_id)
-
-    lex_bot_alias_arn = None
-    bot_id = state.get("LexBotId")
-    alias_id = state.get("LexBotAliasId")
-    if bot_id and alias_id:
-        lex_bot_alias_arn = (
-            f"arn:aws:lex:{region()}:{get_account_id()}:bot-alias/{bot_id}/{alias_id}"
-        )
-        print(f"{OK} Found Lex bot alias ARN: {lex_bot_alias_arn}")
-
-    update_contact_flow(instance_id, flow_id, function_arn, lex_bot_alias_arn)
 
     state.update({
         "LambdaFunctionArn": function_arn,
         "LambdaFunctionName": FUNCTION_NAME,
         "LambdaRoleArn": role_arn,
+        "Architecture": "webrtc-api-gw-ws",
     })
     save_state(state)
 
-    print(f"\n=== Done. Call {state.get('PhoneNumber')} to test Stage 2. ===")
+    grant_lex_invoke(function_arn)
+
+    print("\n=== Done. ===")
+    print(f"     Function ARN: {function_arn}")
     print(f"     Logs: aws logs tail /aws/lambda/{FUNCTION_NAME} --follow (or use scripts/tail_logs.py)")
+    print("     Next: run scripts/provision_lex.py, then scripts/provision_connect.py.")
     return 0
+
+
+def grant_lex_invoke(function_arn: str) -> None:
+    """Idempotently grant Amazon Lex permission to invoke this Lambda."""
+    lc = lambda_client()
+    statement_id = "AllowLexInvoke"
+    try:
+        lc.add_permission(
+            FunctionName=FUNCTION_NAME,
+            StatementId=statement_id,
+            Action="lambda:InvokeFunction",
+            Principal="lexv2.amazonaws.com",
+        )
+        print(f"{OK} Granted lexv2.amazonaws.com -> lambda:InvokeFunction")
+    except ClientError as e:
+        code = e.response["Error"].get("Code", "")
+        if code in ("ResourceConflictException",):
+            print(f"{OK} Lex invoke permission already present (sid={statement_id})")
+            return
+        raise
 
 
 if __name__ == "__main__":

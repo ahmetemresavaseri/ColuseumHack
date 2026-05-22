@@ -20,7 +20,7 @@ def main() -> int:
         "rooms": 4,
         "urgency": "urgent",
         "when": "tomorrow",
-        "email": "customer@example.com",
+        "location": "Bahnhofstrasse 12, 8001 Zürich",
     }
     print(json.dumps(estimate_price(slots, price_matrix), indent=2))
     return 0
