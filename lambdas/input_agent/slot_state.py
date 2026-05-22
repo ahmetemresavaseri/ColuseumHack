@@ -4,12 +4,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-REQUIRED_SLOTS = ("when", "what", "area", "rooms", "urgency", "email")
+REQUIRED_SLOTS = ("when", "where", "what", "area", "rooms", "urgency", "email")
 
 
 @dataclass
 class SlotState:
     when: str | None = None
+    where: str | None = None
     what: str | None = None
     area: float | None = None
     rooms: int | None = None

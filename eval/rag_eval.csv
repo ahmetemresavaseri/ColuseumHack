@@ -1,3 +1,11 @@
-case_id,company_id,question,expected_source,expected_answer_contains,status,notes
-faq-001,glanz-ag,Do you clean offices outside normal hours?,faq.md,evening,pending,
-price-001,glanz-ag,How much is move-out cleaning per square meter?,pricelist.md,4.50,pending,
+case_id,company_id,question,expected_item_id,expected_answer_contains,status,notes
+faq-001,glanz-ag,Do you clean offices outside normal hours?,faq#office-hours,evening,pending,
+faq-002,glanz-ag,Can you give me a price estimate on the call?,faq#price-during-call,ballpark,pending,
+faq-003,glanz-ag,Do you need photos for window cleaning?,faq#photos-needed,photos,pending,
+svc-001,glanz-ag,Is move-out cleaning handover ready?,service#move-out-cleaning,handover,pending,
+svc-002,glanz-ag,What is included in office cleaning?,service#office-cleaning,workstations,pending,
+svc-003,glanz-ag,Do you clean windows on the inside and outside?,service#window-cleaning,exterior,pending,
+svc-004,glanz-ag,Do you do construction cleaning?,service#construction-cleaning,construction,pending,
+price-001,glanz-ag,How much is window cleaning per square meter?,pricing#summary,5,pending,
+price-002,glanz-ag,What is the office cleaning base fee?,pricing#summary,90,pending,
+price-003,glanz-ag,Is there an urgent multiplier on the price?,pricing#summary,multiplier,pending,

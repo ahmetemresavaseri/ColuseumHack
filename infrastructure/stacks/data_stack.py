@@ -31,6 +31,11 @@ class DataStack(cdk.Stack):
             partition_key="companyId",
             sort_key="serviceType",
         )
+        self.knowledge_items_table = self._table(
+            "KnowledgeItems",
+            partition_key="companyId",
+            sort_key="itemId",
+        )
 
         self.bookings_table.add_global_secondary_index(
             index_name="company-updatedAt",
