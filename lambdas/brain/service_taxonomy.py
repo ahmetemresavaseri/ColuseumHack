@@ -5,6 +5,8 @@ from enum import StrEnum
 
 
 class ServiceType(StrEnum):
+    REGULAR_CLEANING = "REGULAR_CLEANING"
+    DEEP_CLEANING = "DEEP_CLEANING"
     MOVE_OUT_CLEANING = "MOVE_OUT_CLEANING"
     OFFICE_CLEANING = "OFFICE_CLEANING"
     CONSTRUCTION_CLEANING = "CONSTRUCTION_CLEANING"
@@ -19,6 +21,8 @@ ALIASES = {
     "construction": ServiceType.CONSTRUCTION_CLEANING,
     "window": ServiceType.WINDOW_CLEANING,
     "facility": ServiceType.FACILITY_MAINTENANCE,
+    "regular": ServiceType.REGULAR_CLEANING,
+    "deep": ServiceType.DEEP_CLEANING,
 }
 
 

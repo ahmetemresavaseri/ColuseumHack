@@ -14,5 +14,20 @@
     "skills": ["CONSTRUCTION_CLEANING", "FACILITY_MAINTENANCE"],
     "capacityHoursPerDay": 6,
     "serviceArea": "Zurich"
+  },
+  {
+    "companyId": "atrium-demo",
+    "crewId": "crew-demo-1",
+    "name": "Atrium Demo Crew",
+    "skills": [
+      "REGULAR_CLEANING",
+      "DEEP_CLEANING",
+      "MOVE_OUT_CLEANING",
+      "OFFICE_CLEANING",
+      "CONSTRUCTION_CLEANING",
+      "WINDOW_CLEANING"
+    ],
+    "capacityHoursPerDay": 8,
+    "serviceArea": "Zurich"
   }
 ]

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ddb_tools import get_available_crews, get_price_matrix
+from ddb_tools import get_available_crews, get_company, get_price_matrix
 from pricing import estimate_price
 
 
@@ -17,7 +17,8 @@ def handler(event: dict[str, Any], context) -> dict[str, Any]:
 
     price_matrix = event.get("priceMatrix") or get_price_matrix(company_id)
     crews = event.get("crews") or get_available_crews(company_id)
-    estimate = estimate_price(slots, price_matrix)
+    company = event.get("company") or get_company(company_id)
+    estimate = estimate_price(slots, price_matrix, rules=company)
 
     service_type = estimate.get("serviceType")
     matching_crews = [

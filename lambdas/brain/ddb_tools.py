@@ -21,8 +21,14 @@ def get_available_crews(company_id: str) -> list[dict[str, Any]]:
 
 
 def get_price_matrix(company_id: str) -> dict[str, Any]:
-    table = _table("PRICE_MATRIX_TABLE", "atrium-price-matrix")
+    table = _table("PRICE_MATRIX_TABLE", "atrium-pricematrix")
     response = table.query(
         KeyConditionExpression=Key("companyId").eq(company_id),
     )
     return {item["serviceType"]: item for item in response.get("Items", [])}
+
+
+def get_company(company_id: str) -> dict[str, Any]:
+    table = _table("COMPANIES_TABLE", "atrium-companies")
+    response = table.get_item(Key={"companyId": company_id})
+    return response.get("Item", {}) or {}
