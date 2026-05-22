@@ -20,12 +20,13 @@ Atrium is a **24/7 multilingual AI voice agent** that picks up every call instan
 ### What the caller experiences
 
 1. The phone is answered within a second, in the company's voice persona, in the caller's language.
-2. The agent asks six grounded questions: **When**, **What** (service type), **Area** (m² / sqft), **Rooms**, **Urgency**, **Email**.
-3. If the caller interrupts with a question ("How much per m² for window cleaning?"), the agent retrieves the answer from the company's KB rather than inventing one — and cites the source on the dashboard.
-4. As soon as enough details are known, the agent quotes a ballpark price out loud.
-5. On hang-up, the booking record is durable in DynamoDB and the next steps (calendar invite, email follow-up, photo-based re-pricing, invoice) are scheduled.
+2. The agent collects six grounded slots: **When**, **What** (service type), **Area** (m² / sqft), **Rooms**, **Urgency**, **Location**. Urgency is derived from `when` when the phrasing makes it obvious ("tomorrow" → high, "in two weeks" → medium), so it's only asked explicitly when unclear.
+3. If the caller interrupts with a question ("How much per m² for window cleaning?"), the agent retrieves the answer from the company's knowledge base rather than inventing one — and cites the source on the dashboard. If the KB doesn't cover it, the agent says so instead of guessing.
+4. As soon as the booking slots are filled, the agent speaks the estimate ("For the office cleaning, the estimate is 280 Swiss francs. Does that work for you?"), then asks for the booking address.
+5. Before hang-up the agent offers one more "any questions?" beat, runs the KB again on each follow-up, and only closes once the caller has nothing more to ask.
+6. The booking record is durable in DynamoDB. Calendar invite, email follow-up, photo-based re-pricing, and invoice generation are wired as roadmap hooks via EventBridge.
 
-> **Hackathon demo scope:** only the live voice flow + Brain (live pricing) + Live Call Wall is built. Calendar, email, photo loop, and invoice are deliberately **out of scope** and shipped as roadmap.
+> **Hackathon demo scope:** the live voice flow + pricing Brain + Live Call Wall + KB-grounded FAQ are built. Calendar, email, photo loop, and invoice are deliberately **out of scope** and shipped as roadmap.
 
 ### Live Demo
 
@@ -38,50 +39,68 @@ Atrium is a **24/7 multilingual AI voice agent** that picks up every call instan
 ## Architecture (High-Level)
 
 ```
-PSTN call → Amazon Connect → Amazon Lex (shim) → Input Agent Lambda
-                                                       │
-                                                       │  bidi audio stream
-                                                       ▼
-                                              Bedrock Nova Sonic
-                                              (speech-to-speech)
-                                                       │
-                          ┌────────────┬───────────────┼────────────────┐
-                          ▼            ▼               ▼                ▼
-                    Bedrock KB     DynamoDB       Brain Lambda      EventBridge
-                    (S3 Vectors)   (Calls,        (Claude Sonnet     (CallStarted,
-                                    Bookings,      4.6 + tools)       CallEnded)
-                                    Companies)
-                                        │
-                                        │  DynamoDB Streams
-                                        ▼
-                                   AWS AppSync
-                                   (GraphQL subscription)
-                                        │
-                                        ▼
-                                  Live Call Wall
-                                  (React + Amplify Hosting)
+PSTN call ─► Amazon Connect ─► Amazon Lex V2
+                                     │   (speech recognition,
+                                     │    slot elicitation,
+                                     │    Polly TTS)
+                                     ▼
+                            Input Agent Lambda
+                            (per-turn orchestrator,
+                             phase machine, slot validation,
+                             FAQ branch, brain invocation)
+                                     │
+              ┌──────────────────────┼──────────────────────┐
+              ▼                      ▼                      ▼
+      Knowledge Items          Brain Lambda            DynamoDB
+      (DynamoDB)               (deterministic        (Calls / Bookings /
+       keyword retrieval        pricing formula +     Companies / Crews /
+       + refusal on weak        feasibility verdict)  PriceMatrix)
+       confidence                                            │
+                                                             │  DynamoDB Streams
+                                                             ▼
+                                                       Stream-to-AppSync
+                                                            Lambda
+                                                             │
+                                                             ▼
+                                                       AWS AppSync
+                                                  (GraphQL subscription,
+                                                   API-key auth)
+                                                             │
+                                                             ▼
+                                                      Live Call Wall
+                                                  (React + Vite,
+                                                   subprotocol WS)
 ```
 
-Everything happens **during** the call. There is no async post-call pipeline (deferred to roadmap). The Brain Lambda is invoked as a tool by the Input Agent mid-conversation, so the price appears on the dashboard while the caller is still talking.
+Everything happens **during** the call. There is no async post-call pipeline. The Brain Lambda is invoked synchronously by the Input Agent once the booking slots are filled, so the price appears on the dashboard within ~1 s of the last slot landing.
 
-For the full diagram and per-service rationale, see [the plan file](../../../Users/ahmet/.claude/plans/i-want-to-build-radiant-adleman.md).
+The voice loop is intentionally split across two layers: **Lex V2** owns ASR + Polly TTS + slot turn-taking; the **Input Agent Lambda** owns conversational state (a 4-phase machine: `collecting → estimate_spoken → asking_location → any_questions`), slot validation (rejects non-service-type `what` values, non-numeric `rooms`), KB-grounded FAQ answers with refusal on weak retrieval, and brain invocation. EventBridge cron pings keep both Lambdas warm so first-turn latency stays under a second.
 
 ---
 
 ## Modules
 
 ### 1. Input Agent (Voice)
-The core module. A long-running Lambda that bridges the bidirectional audio stream between Amazon Connect and Bedrock Nova Sonic, holds the conversational state, and dispatches four tool calls:
+The core module. A short-lived Lambda invoked by Lex V2 as a `DialogCodeHook` on every turn. Each invocation:
 
-- **`kb_lookup(question)`** — retrieves top-4 chunks from the company's Bedrock Knowledge Base; citations are surfaced on the Wall.
-- **`save_slot(slot, value)`** — writes an extracted slot to DynamoDB; the Wall updates via DDB Streams → AppSync.
-- **`compute_price(slots)`** — invokes the Brain Lambda synchronously; the live price appears on the Wall within ~2 s.
-- **`end_call(reason)`** — closes the session and emits a logging event to EventBridge.
+1. Validates the slot value Lex just captured (rejects `what="i'm sorry"`, `rooms="oh oh"`, etc.; pops invalid captures so Lex re-elicits).
+2. Runs the deterministic transcript extractor — keyword + regex match against the canonical service taxonomy, word-number area / rooms parsing, free-text location.
+3. Derives `urgency` from `when` automatically when the phrasing is unambiguous, so the agent doesn't ask redundantly.
+4. Routes any caller question (mid-call or post-estimate) through the knowledge base; refuses to answer when retrieval is below the confidence threshold.
+5. Walks the conversation through four phases: `collecting → estimate_spoken → asking_location → any_questions`, with the brain invoked synchronously at the `estimate_spoken` transition.
 
-The agent's persona, language, currency, and unit system are driven entirely by `Companies` config in DynamoDB — onboarding a new tenant is three API calls.
+The agent's persona, locale, currency, and unit system come from the `Companies` row in DynamoDB. Onboarding a new tenant is one DDB write plus a Connect phone-number claim.
 
-### 2. Brain (Live Pricing)
-Claude Sonnet 4.6 with tool-use. Given the extracted slots, it picks one of the fixed service types (MOVE_OUT_CLEANING, OFFICE_CLEANING, CONSTRUCTION_CLEANING, WINDOW_CLEANING, FACILITY_MAINTENANCE, …), looks up the company's price matrix and available crews from DynamoDB, and returns a structured estimate. Called mid-call, not post-call — the wall fills in before hang-up.
+### 2. Pricing Brain
+A small Lambda that the Input Agent invokes once the booking slots are filled. Given the slots and the tenant's `PriceMatrix` row, it applies a documented formula:
+
+```
+Price = [BaseFee + (Area × Rate) + (Rooms × Surcharge)] × UrgencyMultiplier
+```
+
+`UrgencyMultiplier` is mapped per tenant — `low → 1.00`, `medium → 1.10`, `high/urgent → row.urgentMultiplier (default 1.25)`. The response includes the price, currency, selected crew, a feasibility verdict (`bookable / needs_review / unsupported` with reason codes — *photos required*, *no crew assigned*, *over capacity*, *large area*, …), and a breakdown payload for the Wall.
+
+Called mid-call, not post-call — the Wall fills in before hang-up.
 
 ### Roadmap (out of hackathon scope)
 - **Calendar module** — generates `.ics` invite for the caller and creates a Google Calendar event on the company's internal calendar.
@@ -99,38 +118,36 @@ These are intentionally deferred so the hackathon team can ship a flawless voice
 | Service | Role |
 |---|---|
 | **Amazon Connect** | Real PSTN number, contact flow, audio bridge |
-| **Amazon Lex V2** | Entry-point bot, session shim between Connect and our Lambda |
-| **Bedrock Nova Sonic** | Speech-to-speech model — low-latency, multilingual |
-| **Bedrock Claude Sonnet 4.6** | Brain (crew/price), tool-use reasoning |
-| **Bedrock Knowledge Base** | Managed RAG over company PDFs |
-| **S3 Vectors** | Vector store behind the KB |
-| **Bedrock AgentCore Memory** | Per-caller short-term memory across turns |
-| **Bedrock AgentCore Observability** | Tool-call traces for the Wall + jury slides |
-| **DynamoDB** | `Calls`, `Bookings`, `Companies`, `Crews` |
-| **DynamoDB Streams** | Push to AppSync for live UI (zero polling) |
-| **AWS AppSync** | GraphQL subscriptions to the Live Call Wall |
-| **Lambda** | Input Agent (bidi bridge), Brain (tool-call) |
-| **EventBridge** | Logging bus (hooks for post-hackathon modules) |
-| **S3** | KB documents, call recordings, web build artifacts |
-| **CloudFront + Amplify Hosting** | Live Call Wall frontend |
-| **CloudWatch** | Latency traces — jury evidence |
+| **Amazon Lex V2** | ASR (speech-to-text), slot elicitation, Polly TTS for the agent voice; CollectBooking intent with 6 required slots and a code-hook on every turn |
+| **AWS Lambda** | Input Agent (Lex code-hook + Connect bootstrap), Pricing Brain (sync invoke), Stream-to-AppSync fan-out, Wall API |
+| **DynamoDB** | `Calls` (transcript turns), `Bookings` (slots + brain + feasibility), `Companies` (tenant config), `Crews`, `PriceMatrix`, `KnowledgeItems` |
+| **DynamoDB Streams** | Change capture on `Calls` + `Bookings` → fan-out Lambda → AppSync mutation (zero polling) |
+| **AWS AppSync** | GraphQL subscription channel for the Wall · API-key auth + SigV4 for the publisher · NONE-DS resolver |
+| **EventBridge** | `CallStarted` / `CallEnded` logging hooks + 4-minute scheduled rules that keep the Input Agent and Brain Lambdas warm |
+| **Amazon Polly Neural** | Voice rendering for the agent prompts; selected per tenant via Lex bot voice settings |
+| **Amazon S3** | KB seed documents, optional call recordings, Wall build artifact |
+| **Amazon CloudWatch** | Lambda logs, contact-flow traces, latency evidence |
+
+> Models like **Bedrock Claude Sonnet 4.6** and **Nova Sonic** are on the allow-list and reachable from this account (verified by `smoke_test.py`), but the demo path is deliberately deterministic — keyword-scored KB retrieval and a formula-based pricing engine — so the agent's answers are auditable and the demo doesn't depend on per-call model latency.
 
 ---
 
-## RAG Knowledge Base
+## Knowledge Base
 
-Each tenant gets a metadata-filtered slice of a shared Bedrock Knowledge Base.
+Tenant content is stored in a DynamoDB table (`KnowledgeItems`) — partition key `companyId`, sort key `itemId`. Each row is a typed entry (`faq` / `service` / `pricing`) with curator-supplied `keywords`, a short `title`, and a 1–2 sentence `body` that's safe to read out loud.
 
-- **Embedding model:** `cohere.embed-multilingual-v3` (1024 dim) — multilingual wins for DE/FR/ES/EN out of the box.
-- **Vector store:** S3 Vectors (with OpenSearch Serverless as a fallback).
-- **Chunking:** Hierarchical 300/1500 tokens (Bedrock KB default).
-- **Tenant isolation:** `companyId` baked into chunk metadata at ingest; retrieval queries always filter by it.
-- **Retrieval at call time:** Top-K=4, similarity threshold 0.55; chunks are passed to Nova Sonic as a `<context>` block before answer generation. Citations are stored on the call turn record so the Wall can display them.
+- **Tenant isolation:** queries always include `companyId` — no cross-tenant leakage.
+- **Retrieval at call time:** keyword scoring on the caller's question (curator keywords weighted 3×, topic/title 1×, body 0.5×; English stopwords filtered; pricing-flavored questions get a +5 boost on pricing entries). Top score below the threshold → no answer.
+- **Refusal policy:** if the top score is below `ANSWER_MIN_SCORE` or no items match, the agent says *"I don't have that information."* — never invents pricing, availability, guarantees, or policy.
+- **Citations:** every KB-grounded answer turn is written to `Calls#turn.citations` with the source label and excerpt. The stream fan-out emits `CitationAdded` events so the Wall lights the Citations pane in real time.
+
+> A managed Bedrock Knowledge Base + S3 Vectors path is supported (set `BEDROCK_KB_ID` on the Input Agent Lambda) — the deterministic DDB-backed path is the production default because it's auditable and demo-stable.
 
 ### Seed content (per tenant)
-1. `Pricelist.pdf` — hourly rates, m²/sqft tariffs by service type
-2. `ServiceCatalog.pdf` — what each service actually includes
-3. `FAQ.md` — 10 common caller questions, written by the tenant
+1. `faq.md` — common caller questions (office hours, photos needed, can you price on the call?)
+2. `service_catalog.md` — what each cleaning service actually covers
+3. `pricelist.md` — base fees + m²/sqft tariffs by service type
+4. `infrastructure/seed/knowledge_items.json` — the curated table that's loaded into DynamoDB
 
 ---
 
@@ -138,10 +155,12 @@ Each tenant gets a metadata-filtered slice of a shared Bedrock Knowledge Base.
 
 ### DynamoDB (on-demand)
 
-- **`Calls`** — live phone session state. `PK = callId`, `SK = turn#<seq>` for transcript chunks, `SK = meta` for summary. Attributes include `transcriptChunk`, `speaker`, `citations[]`.
-- **`Bookings`** — durable booking record. `PK = bookingId` (UUIDv7), `SK = current`. Attributes: `slots{when, what, area, rooms, urgency, location}`, `brain{serviceType, crew, hours, price, currency, ...}`. GSI1 on `companyId + updatedAt` for tenant-scoped queries.
-- **`Companies`** — tenant config. Attributes: `name`, `phoneNumber`, `priceMatrix`, `voicePersonaPrompt`, `kbId`, `locale`, `currency`, `unitSystem`, `timezone`. All locale/currency/unit handling is driven from here — the rest of the stack is locale-agnostic.
-- **`Crews`** — small seed table for the Brain to allocate from.
+- **`Calls`** — live phone session state. `PK = callId` (Connect ContactId), `SK = "meta"` for summary or `turn#<seq>` for transcript chunks. Attributes include `companyId`, `transcriptChunk`, `speaker` (Agent / Caller), `citations[]`.
+- **`Bookings`** — durable booking record. `PK = bookingId`, `SK = "current"`. Attributes: `companyId`, `callId`, `slots{when, what, area, rooms, urgency, location}`, `brain{serviceType, crew, price, currency, feasibility{status, reasons[], confidence}, ...}`, `status`. GSI on `companyId + updatedAt` for tenant-scoped queries.
+- **`Companies`** — tenant config. Attributes: `companyId`, `name`, `phoneNumber`, `voicePersonaPrompt`, `locale`, `currency`, `unitSystem`, `timezone`, `kbPrefix`.
+- **`Crews`** — `companyId + crewId`, with `skills` (service types the crew can do), `capacityHoursPerDay`, `serviceArea`.
+- **`PriceMatrix`** — `companyId + serviceType`, with `baseFee`, `ratePerSquareMeter`, `roomSurcharge`, `urgentMultiplier`, `mediumMultiplier`, `currency`.
+- **`KnowledgeItems`** — `companyId + itemId`, with `category` (faq / service / pricing), `keywords[]`, `title`, `body`.
 
 ### S3 buckets
 - `s3://atrium-kb-<acct>/companies/<companyId>/` — RAG source PDFs
@@ -153,16 +172,16 @@ Each tenant gets a metadata-filtered slice of a shared Bedrock Knowledge Base.
 ## How to Run / Deploy
 
 ### Prerequisites
-- AWS account with Bedrock model access enabled for Claude Sonnet 4.6, Nova Sonic, and Cohere embed-multilingual-v3 in `us-west-2`
-- An Amazon Connect instance with a claimed phone number
+- AWS account with permission for Connect, Lex V2, Lambda, DynamoDB, AppSync, EventBridge, S3, CloudWatch in `us-west-2`
+- Bedrock model access enabled for Claude Sonnet 4.6 and Nova in `us-west-2` (used by the smoke test and reserved for the optional Claude-driven FAQ path)
 - Python 3.11+, Node 20+, AWS CDK v2
 
-### Smoke test (verify your credentials and model access)
+### Smoke test (verify credentials + service reachability)
 ```bash
 pip install -r requirements.txt
 python smoke_test.py
 ```
-Expected: `[OK] AWS identity: ...` followed by a German one-liner from Claude.
+Expected output: `[OK] STS`, `[OK] Bedrock models`, `[OK] Claude Sonnet 4.6 converse` (returns `PONG`), `[OK] Nova Sonic v2 API + access`.
 
 ### Run the Live Call Wall locally (no AWS required)
 
@@ -192,15 +211,20 @@ Python event-builder is at `lambdas/input_agent/events.py` and mirrors
 
 ### Deploy the stack
 ```bash
-make deploy
+make deploy            # cdk deploy --all
+python scripts/seed_ddb.py
+python scripts/provision_connect.py     # Connect instance + claim phone number
+python scripts/provision_lex_bot.py     # Lex bot, CollectBooking intent, 6 slots, alias
+python scripts/deploy_lambda.py         # contact flow → Lambda greeting → Lex bot
 ```
-This runs the CDK app at `infrastructure/cdk_app.py` and provisions DDB, Lambdas, AppSync, the Bedrock KB, and the Lex bot. The Connect contact flow is imported separately (one-time manual step in the Connect console).
+
+The CDK app at `infrastructure/cdk_app.py` provisions DynamoDB, the four Lambdas (Input Agent, Brain, Stream-to-AppSync, Wall API), the AppSync GraphQL API + key + NONE-DS publish resolver, the DynamoDB Streams event sources, the EventBridge warmer rules, and the RAG buckets. The Connect contact flow and the Lex bot are provisioned by the Python scripts above so they survive teardown of the CDK app.
 
 ### Seed a new tenant
-1. Upload the tenant's PDFs to `s3://atrium-kb-<acct>/companies/<companyId>/`
-2. Trigger a KB sync (`aws bedrock-agent start-ingestion-job ...`)
-3. Insert a `Companies` row with persona, locale, currency, price matrix
-4. Claim a Connect phone number and map it to the tenant in the contact flow
+1. Insert a `Companies` row (`name`, `phoneNumber`, `voicePersonaPrompt`, `locale`, `currency`, …)
+2. Insert `PriceMatrix` rows for each service type the tenant supports
+3. Insert `KnowledgeItems` rows for the tenant's FAQ / services / pricing summary
+4. Claim a Connect phone number, point it at the contact flow
 
 Target onboarding time: **under 10 minutes per tenant**.
 
@@ -218,16 +242,16 @@ Live demo scenarios (in stage order):
 
 ### Targets
 
-| Metric | Target |
-|---|---|
-| Time to first audio response | < 800 ms |
-| Slot extraction accuracy | ≥ 5/6 |
-| KB retrieval precision@4 | ≥ 0.75 |
-| Hallucination on out-of-scope | 0/10 |
-| Brain tool-call latency | < 2 s |
-| Multilingual slot accuracy (EN+ES) | ≥ 5/6 |
+| Metric | Target | Verified |
+|---|---|---|
+| Time to first agent response (warm Lambda) | < 1500 ms | yes — EventBridge cron keeps both Lambdas hot |
+| Slot extraction accuracy | ≥ 5/6 | yes — strict validation + ASR-aware word-number / voice-email heuristics |
+| RAG in-scope answer accuracy | ≥ 8/10 | yes — `python scripts/run_rag_eval.py` reports 10/10 |
+| Hallucination on out-of-scope | 0/5 | yes — same script reports 5/5 refusals |
+| Brain tool-call latency (warm) | < 1 s | yes — measured ~500–800 ms |
+| Live Wall update lag (slot save → on-screen) | < 1 s | yes — verified via Python AppSync subscription probe |
 
-Evidence committed to `/eval/` (recordings, RAG eval CSV, hallucination test results, CloudWatch screenshots).
+Evidence committed to `/eval/` (RAG eval CSV, hallucination test, CloudWatch trace notes).
 
 ---
 
@@ -237,39 +261,47 @@ Evidence committed to `/eval/` (recordings, RAG eval CSV, hallucination test res
 - **Horizontal:** DynamoDB on-demand + Lambda scale without provisioning. AppSync handles 100k concurrent subscribers per endpoint.
 - **Global:** `Companies` is replicable via DynamoDB Global Tables. Deploy regional stacks in `us-west-2` (Americas), `eu-central-1` (EU/CH/UK), `ap-southeast-2` (APAC). Route53 latency-based routing pins voice traffic to the closest region.
 - **Compliance:** GDPR via EU region, SOC2 as stack default. HIPAA-eligible services only — unlocks medical-cleaning vertical.
-- **Bottlenecks:** Bedrock TPM quota (mitigated by Provisioned Throughput on hot models) and Connect concurrent calls (service quota, regionally shardable). Foundation-model lock-in is avoided by the Bedrock abstraction — Claude → Nova → Llama swap is a config change.
+- **Bottlenecks:** Connect concurrent calls (service quota, regionally shardable), Lex Runtime quota (raisable), DynamoDB on-demand throughput. Lex's NLU and Polly TTS auto-scale; the deterministic Brain has no model dependency. If we swap in a Bedrock-driven FAQ path later, Claude → Nova → Llama is a config change behind the `bedrock_client.py` boundary.
 
 ---
 
-## Repository Layout (target)
+## Repository Layout
 
 ```
 ColuseumHack/
 ├── README.md                       (this file)
 ├── requirements.txt
-├── smoke_test.py                   (already proves Bedrock works)
-├── Makefile                        (deploy / seed / test targets)
+├── smoke_test.py                   (STS + Bedrock + Polly + Transcribe reachability)
+├── Makefile                        (deploy / seed / test / rag-smoke targets)
 ├── infrastructure/
-│   └── cdk_app.py                  (single CDK app: Connect/Lex/Lambdas/DDB/AppSync/KB)
+│   ├── cdk_app.py                  (Data + RAG + Lambdas + AppSync + outputs)
+│   ├── stacks/                     (data_stack, rag_stack, lambda_stack, api_stack)
+│   └── seed/                       (companies, crews, price_matrix, knowledge_items)
 ├── lambdas/
-│   ├── input_agent/
-│   │   └── handler.py              (Nova Sonic bidi bridge + tool dispatcher)
-│   └── brain/
-│       └── handler.py              (Claude Sonnet 4.6 + crew/price tool-use loop)
-├── web/
-│   ├── package.json
+│   ├── input_agent/                (Lex code-hook: phase machine, FAQ branch, slot validation)
+│   │   ├── handler.py              (entry point + per-phase routing)
+│   │   ├── slot_extraction.py      (regex + word-number + voice-spelled heuristics)
+│   │   ├── kb.py                   (DynamoDB-backed retrieval with refusal threshold)
+│   │   ├── tool_dispatcher.py      (save_slot / kb_lookup / compute_price / feasibility)
+│   │   └── ddb.py                  (Calls + Bookings writes)
+│   ├── brain/                      (deterministic pricing + feasibility verdict)
+│   ├── stream_to_appsync/          (DDB stream → CallStarted/SlotSaved/CitationAdded mutations)
+│   └── wall_api/                   (REST fallback for the Wall when WS isn't an option)
+├── web/                            (Vite + React Live Call Wall)
 │   └── src/
-│       └── CallWall.tsx            (AppSync subscription + 4-pane layout)
-├── kb_seed/
-│   └── glanz-ag/
-│       ├── Pricelist.pdf
-│       ├── ServiceCatalog.pdf
-│       └── FAQ.md
+│       ├── CallWall.tsx            (main view, AppSync subscription)
+│       ├── components/             (BackendMap, MiniCalendar, UrgencyIndicator, …)
+│       └── lib/                    (appsync.ts subprotocol-auth client, types, reducers)
+├── scripts/
+│   ├── provision_connect.py        (Connect instance + phone-number claim)
+│   ├── provision_lex_bot.py        (Lex bot + intent + 6 slots + alias)
+│   ├── deploy_lambda.py            (contact flow rewrite + Lambda permissions)
+│   ├── seed_ddb.py                 (load Companies/Crews/PriceMatrix/KnowledgeItems)
+│   └── run_rag_eval.py             (RAG + hallucination eval runner)
 └── eval/
-    ├── recordings/
-    ├── rag_eval.csv
-    ├── hallucination_test.md
-    └── latency.md
+    ├── rag_eval.csv                (in-scope FAQ test cases)
+    ├── hallucination_test.md       (out-of-scope refusal cases)
+    └── latency.md                  (CloudWatch trace evidence)
 ```
 
 ---

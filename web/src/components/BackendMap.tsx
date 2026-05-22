@@ -3,12 +3,12 @@ import { Fragment, type JSX } from "react";
 /* ──────────────────────────────────────────────────────────────────────────────
    Atrium Backend Flow — mirrors README "Architecture (High-Level)".
 
-   Phase 1: Input        Caller dials → Connect → Lex V2 shim
-   Phase 2: Agent        Input Agent Lambda ⇄ Bedrock Nova Sonic (bidi audio)
-   Phase 3: Tools        Nova Sonic calls 4 tools mid-conversation
-   Phase 4: Live UI      DDB Streams → AppSync → Call Wall
+   Phase 1: Input        Caller dials → Amazon Connect → Lex V2 (ASR + slots)
+   Phase 2: Agent        Input Agent Lambda — per-turn orchestrator
+   Phase 3: Tools        Knowledge Items · DynamoDB · Brain · EventBridge
+   Phase 4: Live UI      DDB Streams → AppSync → Live Call Wall
 
-   Cross-cutting footnote: AgentCore Memory + Observability + CloudWatch.
+   Cross-cutting: CloudWatch · S3 · EventBridge warmers.
    ────────────────────────────────────────────────────────────────────────────── */
 
 type Card = {
@@ -33,32 +33,23 @@ const PHASES: Phase[] = [
     sub: "Caller dials the published number. Audio enters the agent.",
     rows: [
       [
-        { id: "pstn",    title: "PSTN Caller",     sub: "Inbound phone call",                       badge: "Trigger",     icon: <IconPhone /> },
-        { id: "connect", title: "Amazon Connect",  sub: "Phone number, contact flow, audio bridge", badge: "AWS Service", icon: <IconHeadset /> },
-        { id: "lex",     title: "Amazon Lex V2",   sub: "Session shim between Connect and Lambda",  badge: "AWS Service", icon: <IconEar /> },
+        { id: "pstn",    title: "PSTN Caller",     sub: "Inbound phone call",                                    badge: "Trigger",     icon: <IconPhone /> },
+        { id: "connect", title: "Amazon Connect",  sub: "Phone number · contact flow · audio bridge",            badge: "AWS Service", icon: <IconHeadset /> },
+        { id: "lex",     title: "Amazon Lex V2",   sub: "Speech recognition · slot elicitation · Polly TTS",     badge: "AWS Service", icon: <IconEar /> },
       ],
     ],
   },
   {
     label: "Agent",
-    sub: "Long-running Lambda bridges a bidirectional audio stream to Nova Sonic.",
-    bidi: true,
+    sub: "Lex code-hook invokes the Lambda on every turn. It drives the conversation phase machine, validates slots, routes FAQs to the knowledge base, and calls the pricing brain when ready.",
     rows: [
       [
         {
           id: "input-agent",
           title: "Input Agent Lambda",
-          sub: "Bidi audio bridge · conversational state · tool dispatch",
+          sub: "Per-turn orchestrator · slot validation · phase machine (collect → estimate → confirm → questions)",
           badge: "AI Agent",
           icon: <IconAtom />,
-          hero: true,
-        },
-        {
-          id: "nova",
-          title: "Bedrock Nova Sonic",
-          sub: "Speech-to-speech foundation model · multilingual",
-          badge: "AI Model",
-          icon: <IconBrain />,
           hero: true,
         },
       ],
@@ -66,13 +57,13 @@ const PHASES: Phase[] = [
   },
   {
     label: "Tools",
-    sub: "Nova Sonic invokes these four tools mid-conversation, while the caller is still speaking.",
+    sub: "The agent calls these tools mid-conversation while the caller is still speaking.",
     rows: [
       [
-        { id: "kb",          title: "Bedrock Knowledge Base", sub: "RAG · S3 Vectors · cohere-embed-multilingual-v3", badge: "RAG",         icon: <IconBook /> },
-        { id: "ddb",         title: "DynamoDB",               sub: "Calls · Bookings · Companies · Crews",            badge: "Database",    icon: <IconDatabase /> },
-        { id: "brain",       title: "Cost Lambda",            sub: "Claude Sonnet 4.6 + tool-use · live price + crew", badge: "AI Tool",     icon: <IconCalculator /> },
-        { id: "eventbridge", title: "EventBridge",            sub: "CallStarted · CallEnded · roadmap hooks",         badge: "AWS Service", icon: <IconBolt /> },
+        { id: "kb",          title: "Knowledge Items",  sub: "Tenant-scoped FAQ / services / pricing · keyword retrieval · refusal on low confidence", badge: "RAG",         icon: <IconBook /> },
+        { id: "ddb",         title: "DynamoDB",          sub: "Calls · Bookings · Companies · Crews · PriceMatrix",                                     badge: "Database",    icon: <IconDatabase /> },
+        { id: "brain",       title: "Pricing Brain",     sub: "Deterministic formula · crew assignment · feasibility verdict",                          badge: "AI Tool",     icon: <IconCalculator /> },
+        { id: "eventbridge", title: "EventBridge",       sub: "CallStarted · CallEnded · Lambda warmers",                                              badge: "AWS Service", icon: <IconBolt /> },
       ],
     ],
   },
@@ -81,19 +72,19 @@ const PHASES: Phase[] = [
     sub: "Slot writes propagate to the dashboard in real time — zero polling.",
     rows: [
       [
-        { id: "streams", title: "DynamoDB Streams", sub: "Change capture on every write",          badge: "AWS Service", icon: <IconStream /> },
-        { id: "appsync", title: "AWS AppSync",      sub: "GraphQL subscriptions",                  badge: "AWS Service", icon: <IconCloud /> },
-        { id: "wall",    title: "Live Call Wall",   sub: "React · Amplify Hosting · this app",     badge: "Frontend",    icon: <IconMonitor /> },
+        { id: "streams", title: "DynamoDB Streams", sub: "Change capture on every write",                       badge: "AWS Service", icon: <IconStream /> },
+        { id: "appsync", title: "AWS AppSync",      sub: "GraphQL subscription · API-key auth",                 badge: "AWS Service", icon: <IconCloud /> },
+        { id: "wall",    title: "Live Call Wall",   sub: "React · Amplify Hosting · this app",                  badge: "Frontend",    icon: <IconMonitor /> },
       ],
     ],
   },
 ];
 
 const CROSS_CUTTING = [
-  { label: "Bedrock AgentCore Memory",        sub: "Per-caller short-term memory across turns" },
-  { label: "Bedrock AgentCore Observability", sub: "Tool-call traces for the Wall + jury slides" },
-  { label: "Amazon CloudWatch",               sub: "Latency traces · jury evidence" },
-  { label: "Amazon S3",                       sub: "KB docs · call recordings · Wall build artifact" },
+  { label: "Amazon CloudWatch",  sub: "Lambda logs · contact-flow traces · latency evidence" },
+  { label: "Amazon S3",          sub: "KB seed docs · call recordings · Wall build artifact" },
+  { label: "EventBridge warmer", sub: "4-min cron keeps Input Agent + Brain Lambdas hot" },
+  { label: "Amazon Polly",       sub: "Neural TTS — agent voice, rendered inside Lex" },
 ];
 
 export default function BackendMap() {
