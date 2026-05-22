@@ -36,6 +36,15 @@ type EnvBag = {
   companyName: string;
 };
 
+// Render "+15612820331" as "+1 561 282 0331" (or fall back to as-is).
+function formatPhone(raw: string): string {
+  const digits = raw.replace(/[^\d]/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `+1 ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
+  }
+  return raw;
+}
+
 function readEnv(): EnvBag {
   const env = (import.meta as ImportMeta & { env: Record<string, string | undefined> }).env;
   return {
@@ -175,14 +184,18 @@ export default function CallWall() {
   return (
     <main className="wall">
       <header className="wallHeader">
-        <div>
-          <p className="eyebrow">Atrium Live Call Wall</p>
+        <div className="headerLeft">
           <h1>{call.companyName}</h1>
           {envBag.phoneNumber ? (
-            <p className="callPrompt">
-              Call this number to start the demo:{" "}
-              <strong>{envBag.phoneNumber}</strong>
-            </p>
+            <a className="callCta" href={`tel:${envBag.phoneNumber}`}>
+              <span className="callCtaIcon" aria-hidden>
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 6 6L15 14l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z" />
+                </svg>
+              </span>
+              <span className="callCtaLead">Speak to Atrium</span>
+              <span className="callCtaNumber">{formatPhone(envBag.phoneNumber)}</span>
+            </a>
           ) : (
             <p className="placeholder">
               Phone number not configured —{" "}

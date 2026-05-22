@@ -9,12 +9,14 @@ export function CitationsPane({ citations }: { citations: Citation[] }) {
           KB citations appear here when the agent answers an FAQ.
         </p>
       ) : (
-        citations.map((citation, idx) => (
-          <article key={`${citation.source}-${idx}`}>
-            <strong>{citation.source}</strong>
-            <p>{citation.excerpt}</p>
-          </article>
-        ))
+        <ul className="citationList">
+          {citations.map((citation, idx) => (
+            <li key={`${citation.source}-${idx}`} className="citation">
+              <span className="citationSource">{citation.source}</span>
+              <p className="citationExcerpt">{citation.excerpt}</p>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );

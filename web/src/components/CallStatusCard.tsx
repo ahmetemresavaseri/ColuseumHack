@@ -1,5 +1,12 @@
 import type { LiveCall } from "../lib/types";
 
+function statusTone(status: string): "idle" | "live" | "ended" {
+  const s = (status || "").toLowerCase();
+  if (s.includes("end") || s.includes("hung") || s.includes("done")) return "ended";
+  if (s === "idle" || s === "" || s.includes("wait")) return "idle";
+  return "live";
+}
+
 export function CallStatusCard({
   call,
   wallStatus,
@@ -9,11 +16,15 @@ export function CallStatusCard({
   wallStatus?: string;
   audioStatus?: string;
 }) {
+  const tone = statusTone(call.status);
   return (
     <section className="panel statusPanel">
       <p className="eyebrow">Call</p>
-      <h2>{call.status}</h2>
-      <dl>
+      <div className="statusHeadline">
+        <span className={`statusDot statusDot--${tone}`} aria-hidden />
+        <h2>{call.status || "Idle"}</h2>
+      </div>
+      <dl className="statusList">
         <div>
           <dt>Caller</dt>
           <dd>{call.caller || "—"}</dd>

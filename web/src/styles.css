@@ -1,6 +1,34 @@
+/* ============================================================
+   Atrium brand palette — single source of truth.
+   ============================================================ */
 :root {
-  color: #172026;
-  background: #f4f7f6;
+  /* Brand */
+  --c-action: #0D8A7A;          /* Action / darkest — primary buttons, key text */
+  --c-accent: #12BFA0;           /* Accent — highlights, hover, active states */
+  --c-tint:   #A8EDE0;           /* Tint fills — icon backgrounds, soft chips */
+  --c-bg:     #E8FAF7;           /* Page background */
+
+  /* Derived neutrals (tinted toward the brand green) */
+  --c-text:        #0d2922;
+  --c-text-muted:  #4a6864;
+  --c-text-soft:   #7a8e8a;
+  --c-surface:     #ffffff;      /* Card / panel fill */
+  --c-border:      #cfeae3;
+  --c-border-soft: #e0eee9;
+
+  /* Status (semantic, kept distinct from brand on purpose) */
+  --c-warn-bg:    #fff3d6;
+  --c-warn-fg:    #8a5a00;
+  --c-warn-bd:    #f0d28a;
+  --c-error-bg:   #fadcd6;
+  --c-error-fg:   #8a2018;
+  --c-error-bd:   #f0a89c;
+  --c-success-bg: #d6f3ea;
+  --c-success-fg: var(--c-action);
+  --c-success-bd: var(--c-tint);
+
+  color: var(--c-text);
+  background: var(--c-bg);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -8,18 +36,79 @@ body {
   margin: 0;
 }
 
-button {
-  border: 1px solid #b9c7c2;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #172026;
-  padding: 0.55rem 0.8rem;
+/* ============================================================
+   Global overflow guards — ensure no text escapes its container,
+   and let flex/grid children shrink down so wrapping can happen.
+   ============================================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
+/* Make every panel- or card-descendant break long strings (emails, URLs,
+   IDs) at any character if there's no natural break point. */
+.panel,
+.panel *,
+.bmap-card,
+.bmap-card *,
+.bmap-phase,
+.bmap-phase *,
+.bmap-cross,
+.bmap-cross * {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Flex / grid children can otherwise refuse to shrink below their content's
+   intrinsic width, which causes overflow. Force them to be shrinkable. */
+.grid,
+.grid > *,
+.slotGrid,
+.slotGrid > *,
+.bmap-grid,
+.bmap-grid > *,
+.bmap-flow,
+.bmap-flow > *,
+.bmap-row,
+.bmap-row > *,
+.bmap-phase-rows,
+.bmap-phase-rows > *,
+.bmap-cross-list,
+.bmap-cross-list > * {
+  min-width: 0;
+}
+
+/* ----------------------------------------------------------------
+   Global button geometry — single 8px radius for every clickable
+   button across the app. No mixing of sharp rectangles and pills.
+   ---------------------------------------------------------------- */
+button {
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-surface);
+  color: var(--c-text);
+  padding: 0.55rem 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+
+button:hover {
+  border-color: var(--c-accent);
+}
+
+/* ============================================================
+   Live Call Wall — light brand theme.
+   ============================================================ */
+
 .wall {
-  max-width: 1180px;
+  /* Match the Backend Map's horizontal bounds so the two views line up
+     when the user toggles between tabs. */
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 28px;
+  padding: 14px 32px 18px;
 }
 
 .wallHeader {
@@ -27,17 +116,362 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
+}
+
+.wallHeader h1 {
+  font-size: 1.5rem;
 }
 
 .wallHeader h1,
 .panel h2 {
   margin: 0;
+  color: var(--c-text);
+  font-size: 1.4rem;
+  line-height: 1.15;
+}
+
+/* ── Status panel ────────────────────────────────────────── */
+
+.statusHeadline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.statusDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.statusDot--idle  { background: #c8d1cf; }
+.statusDot--ended { background: var(--c-text-soft); }
+.statusDot--live  {
+  background: var(--c-accent);
+  box-shadow: 0 0 0 0 rgba(18, 191, 160, 0.6);
+  animation: dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(18, 191, 160, 0.55); }
+  50%      { box-shadow: 0 0 0 8px rgba(18, 191, 160, 0);    }
+}
+
+.statusList {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+.statusList > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--c-border-soft);
+}
+.statusList > div:last-child { border-bottom: none; }
+.statusList dt {
+  color: var(--c-text-muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+.statusList dd {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: right;
+}
+
+/* ── Slots panel ──────────────────────────────────────────── */
+
+/* Two-column layout: slot grid on the left, mini calendar on the right.
+   The two columns stretch to match heights so there's no dead space below. */
+.slotsBody {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 12px;
+  align-items: stretch;
+}
+
+@media (max-width: 880px) {
+  .slotsBody { grid-template-columns: 1fr; }
+}
+
+.slot {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--c-border-soft);
+  background: linear-gradient(180deg, #fbfefd 0%, #f5fbf9 100%);
+}
+.slot dt {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-text-muted);
+  font-weight: 700;
+}
+.slot dd {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.25;
+}
+.slot--filled {
+  border-color: var(--c-accent);
+  background: linear-gradient(180deg, #effbf7 0%, #e2f6ef 100%);
+}
+.slot--filled dd {
+  color: var(--c-action);
+  font-weight: 700;
+}
+.slot--pending dd {
+  color: var(--c-text-soft);
+  font-style: italic;
+  font-weight: 500;
+}
+
+/* ── Urgency indicator (inside the urgency slot) ──────────── */
+
+.urgencyBars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 18px;
+}
+
+.urgencyBar {
+  width: 5px;
+  border-radius: 2px;
+  background: var(--c-border);
+  transition: background 0.2s ease;
+}
+.urgencyBar-1 { height: 8px;  }
+.urgencyBar-2 { height: 13px; }
+.urgencyBar-3 { height: 18px; }
+
+/* Filled bars darken as urgency rises. Same hue family, escalating tone. */
+.urgencyBars[data-level="1"] .urgencyBar.filled { background: var(--c-tint);   }
+.urgencyBars[data-level="2"] .urgencyBar.filled { background: var(--c-accent); }
+.urgencyBars[data-level="3"] .urgencyBar.filled { background: var(--c-action); }
+
+/* Slot-card colour responds to high urgency so the eye lands on it. */
+.urgencyBars[data-level="3"] {
+  filter: drop-shadow(0 0 4px rgba(13, 138, 122, 0.35));
+}
+
+.urgencyLabel {
+  margin-left: 8px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--c-text);
+  align-self: center;
+  line-height: 1;
+}
+
+/* The slot card's own colour also tracks level — pending → high. */
+.slot:has(.urgencyBars[data-level="3"]) {
+  border-color: var(--c-action);
+  background: linear-gradient(180deg, #effbf7 0%, #d9f1ea 100%);
+}
+.slot:has(.urgencyBars[data-level="2"]) {
+  border-color: var(--c-accent);
+}
+
+/* ── Mini calendar (inside Slots panel) ──────────────────── */
+
+.miniCal {
+  border: 1px solid var(--c-border-soft);
+  border-radius: 10px;
+  padding: 8px 10px 10px;
+  background: linear-gradient(180deg, #fbfefd 0%, #f5fbf9 100%);
+  font-size: 0.72rem;
+  user-select: none;
+}
+
+.miniCalHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  gap: 6px;
+}
+
+.miniCalLabel {
+  font-weight: 700;
+  color: var(--c-text);
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  text-align: center;
+  flex: 1;
+}
+
+.miniCalNav {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  color: var(--c-action);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.miniCalNav:hover {
+  background: var(--c-tint);
+  border-color: var(--c-accent);
+}
+
+.miniCalWeek,
+.miniCalGrid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.miniCalWeek span {
+  text-align: center;
+  color: var(--c-text-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 0;
+}
+
+.miniCalDay {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--c-text);
+  background: transparent;
+}
+
+.miniCalDay--muted   { color: var(--c-text-soft); opacity: 0.6; }
+.miniCalDay--today   { outline: 1px solid var(--c-border); }
+.miniCalDay--booked  {
+  background: var(--c-action);
+  color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(18, 191, 160, 0.25);
+}
+
+/* ── Brain panel ──────────────────────────────────────────── */
+
+/* Center the eyebrow + price + chip vertically in the panel,
+   so the final price sits as the visual anchor. */
+.brainPanel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+}
+
+.brainPanel .eyebrow {
+  margin-bottom: 0;
+}
+
+.brainPanel h2 {
+  font-size: 2.1rem;
+  color: var(--c-action);
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+.brainPanel .brainPriceIdle {
+  color: var(--c-text-soft);
+  font-weight: 600;
+}
+.brainPanel > p {
+  color: var(--c-text-muted);
+  font-size: 0.86rem;
+  margin: 0;
+}
+.brainPanel .feasibility {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Transcript panel ─────────────────────────────────────── */
+
+.turn {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--c-bg);
+  align-items: center;
+}
+.turn p { font-size: 0.88rem; line-height: 1.4; color: var(--c-text); margin: 0; }
+
+.turnSpeaker {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  text-align: center;
+}
+.turn--agent  .turnSpeaker { background: var(--c-action); color: #ffffff; }
+.turn--caller .turnSpeaker { background: var(--c-tint); color: var(--c-action); }
+.turn--system .turnSpeaker { background: var(--c-bg); color: var(--c-text-soft); border: 1px solid var(--c-border); }
+
+/* ── Citations panel ──────────────────────────────────────── */
+
+.citationList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.citation {
+  border: 1px solid var(--c-border-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fbfefd;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.citationSource {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: var(--c-action);
+}
+.citationExcerpt {
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--c-text);
+  margin: 0;
 }
 
 .eyebrow {
   margin: 0 0 6px;
-  color: #53635f;
+  color: var(--c-text-muted);
   font-size: 0.76rem;
   font-weight: 700;
   letter-spacing: 0;
@@ -47,19 +481,88 @@ button {
 .grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  gap: 10px;
 }
 
 .panel {
-  border: 1px solid #d9e2df;
-  border-radius: 8px;
-  background: #ffffff;
-  padding: 16px;
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  background: var(--c-surface);
+  padding: 12px 14px;
+  box-shadow: 0 1px 2px rgba(13, 41, 34, 0.04), 0 4px 14px rgba(13, 41, 34, 0.05);
+  opacity: 0;
+  animation: wall-panel-in 0.45s ease-out forwards;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.statusPanel,
+.panel:hover {
+  transform: translateY(-2px);
+  border-color: var(--c-accent);
+  box-shadow: 0 6px 18px rgba(18, 191, 160, 0.18);
+}
+
+/* Stagger each panel so the page assembles in front of the user. */
+.grid > .panel:nth-child(1) { animation-delay: 60ms; }
+.grid > .panel:nth-child(2) { animation-delay: 140ms; }
+.grid > .panel:nth-child(3) { animation-delay: 220ms; }
+.grid > .panel:nth-child(4) { animation-delay: 300ms; }
+.grid > .panel:nth-child(5) { animation-delay: 380ms; }
+.grid > .panel:nth-child(6) { animation-delay: 460ms; }
+
+@keyframes wall-panel-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Top section also fades in, slightly ahead of the panels. */
+.wallHeader {
+  opacity: 0;
+  animation: wall-panel-in 0.45s ease-out forwards;
+}
+
+/* Row 1 — narrow Status on the left, wide Transcript that starts halfway
+   across the Slots box below it (col 2) and runs to the right edge. */
+.statusPanel {
+  grid-column: 1 / span 1;
+}
+
 .transcriptPanel {
-  grid-column: span 2;
+  grid-column: 2 / span 3;
+  height: 320px;
+  overflow-y: auto;
+}
+
+/* Row 2 — Slots takes the left 3 cols, Brain slims to the right column. */
+.slotsPanel { grid-column: 1 / span 3; }
+.brainPanel { grid-column: 4 / span 1; }
+
+.transcriptPanel > .eyebrow {
+  position: sticky;
+  top: 0;
+  background: var(--c-surface);
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+  z-index: 1;
+}
+
+/* Branded scrollbar so the panel doesn't look generic. */
+.transcriptPanel::-webkit-scrollbar {
+  width: 8px;
+}
+.transcriptPanel::-webkit-scrollbar-track {
+  background: transparent;
+}
+.transcriptPanel::-webkit-scrollbar-thumb {
+  background: var(--c-tint);
+  border-radius: 999px;
+  border: 2px solid var(--c-surface);
+}
+.transcriptPanel::-webkit-scrollbar-thumb:hover {
+  background: var(--c-accent);
+}
+.transcriptPanel {
+  scrollbar-width: thin;
+  scrollbar-color: var(--c-tint) transparent;
 }
 
 .citationsPanel {
@@ -72,30 +575,50 @@ p {
 }
 
 dt {
-  color: #60716c;
+  color: var(--c-text-muted);
   font-size: 0.78rem;
 }
 
 dd {
-  margin: 0 0 10px;
+  margin: 0 0 6px;
   font-weight: 650;
+  color: var(--c-text);
+  /* Long strings (emails, URLs, addresses) must wrap inside the panel. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
 }
 
 .slotGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  /* Three equal-height rows so the slot column matches the calendar's height. */
+  grid-template-rows: repeat(3, 1fr);
+  gap: 8px 28px;
+  min-width: 0;
+  height: 100%;
+}
+
+.slotGrid > * {
+  min-width: 0;
+}
+
+.turn p,
+.citationsPanel p,
+.placeholder {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .turnList {
   display: grid;
-  gap: 10px;
+  gap: 6px;
 }
 
 .turn p,
 .citationsPanel p {
   margin-top: 4px;
-  color: #33413d;
+  color: var(--c-text-muted);
 }
 
 .controls {
@@ -104,9 +627,27 @@ dd {
 }
 
 .controls button.primary {
-  background: #1b5e4f;
+  background: var(--c-action);
   color: #ffffff;
-  border-color: #1b5e4f;
+  border-color: var(--c-action);
+}
+
+.controls button.primary:hover {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+/* Secondary buttons (Clear, Hang up, Call via mic) get a deliberately
+   visible neutral-grey border so the container reads as clickable. */
+.controls button.secondary {
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  border: 1px solid #c8d6d3;
+}
+
+.controls button.secondary:hover {
+  color: var(--c-action);
+  border-color: var(--c-action);
 }
 
 .controls button[disabled] {
@@ -115,32 +656,101 @@ dd {
 }
 
 .placeholder {
-  color: #60716c;
+  color: var(--c-text-soft);
   font-style: italic;
   font-size: 0.9rem;
 }
 
 .errorText {
-  color: #b1463d;
+  color: var(--c-error-fg);
   margin-top: 8px;
   font-weight: 600;
 }
 
 code {
-  background: #ebf1ee;
+  background: var(--c-tint);
+  color: var(--c-action);
   padding: 0 4px;
   border-radius: 4px;
 }
 
-.callPrompt {
-  margin-top: 6px;
-  color: #1b5e4f;
-  font-size: 0.95rem;
+/* Header puts the h1 and the call-to-action pill on the same flex row. */
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
 }
 
-.callPrompt strong {
+/* Call-to-action pill — sits inline with the company name in the header.
+   Tappable on mobile via the tel: link. */
+.callCta {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffffff 0%, #f0fbf7 100%);
+  border: 1.5px solid var(--c-accent);
+  color: var(--c-action);
+  text-decoration: none;
+  width: fit-content;
+  box-shadow: 0 0 0 1px rgba(18, 191, 160, 0.1), 0 6px 18px rgba(13, 138, 122, 0.12);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+  animation: cta-halo 3s ease-in-out infinite;
+}
+
+.callCta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px rgba(18, 191, 160, 0.18), 0 8px 24px rgba(13, 138, 122, 0.2);
+}
+
+.callCtaIcon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--c-action);
+  color: #fff;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.callCtaLead {
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: 0.01em;
+  color: var(--c-text);
+}
+
+.callCtaNumber {
   font-family: ui-monospace, SFMono-Regular, "Courier New", monospace;
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--c-action);
+  padding-left: 12px;
+  border-left: 1px solid var(--c-border);
   letter-spacing: 0.02em;
+}
+
+@keyframes cta-halo {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(18, 191, 160, 0.10), 0 6px 18px rgba(13, 138, 122, 0.12); }
+  50%      { box-shadow: 0 0 0 1px rgba(18, 191, 160, 0.30), 0 8px 30px rgba(13, 138, 122, 0.22); }
+}
+
+/* "Pending" placeholders should look like they're waiting on data, not dead. */
+.placeholder {
+  color: var(--c-text-soft);
+  font-style: italic;
+  font-size: 0.9rem;
+  animation: wall-pending-fade 1.6s ease-in-out infinite;
+}
+
+@keyframes wall-pending-fade {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 0.95; }
 }
 
 .feasibility {
@@ -158,21 +768,21 @@ code {
 }
 
 .feasChip--bookable {
-  background: #def4e6;
-  color: #1b5e4f;
-  border: 1px solid #b6e2c5;
+  background: var(--c-success-bg);
+  color: var(--c-success-fg);
+  border: 1px solid var(--c-success-bd);
 }
 
 .feasChip--needs_review {
-  background: #fff3d6;
-  color: #8a5a00;
-  border: 1px solid #f0d28a;
+  background: var(--c-warn-bg);
+  color: var(--c-warn-fg);
+  border: 1px solid var(--c-warn-bd);
 }
 
 .feasChip--unsupported {
-  background: #fadcd6;
-  color: #8a2018;
-  border: 1px solid #f0a89c;
+  background: var(--c-error-bg);
+  color: var(--c-error-fg);
+  border: 1px solid var(--c-error-bd);
 }
 
 .feasReasons {
@@ -186,9 +796,9 @@ code {
 
 .feasReasons li {
   font-size: 0.78rem;
-  color: #53635f;
-  background: #f4f7f6;
-  border: 1px solid #d9e2df;
+  color: var(--c-text-muted);
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
   border-radius: 4px;
   padding: 2px 6px;
 }
@@ -212,4 +822,354 @@ code {
   .citationsPanel {
     grid-column: span 1;
   }
+}
+
+/* ============================================================
+   Backend System Map — light brand theme, scoped to .bmap-*.
+   ============================================================ */
+
+.bmap-scene {
+  min-height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+  background: var(--c-bg);
+  color: var(--c-text);
+  padding: 20px 40px 24px;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  box-sizing: border-box;
+}
+
+.bmap-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin: 0 auto 14px;
+  max-width: 1280px;
+  width: 100%;
+}
+
+.bmap-eyebrow {
+  display: inline-block;
+  background: var(--c-tint);
+  border: 1px solid var(--c-border);
+  color: var(--c-action);
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 6px;
+  margin: 0 0 6px;
+}
+
+.bmap-title {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--c-text);
+  text-transform: uppercase;
+}
+
+.bmap-scene-tag {
+  color: var(--c-text-soft);
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+}
+
+/* ── Flow container — three vertically stacked phases, separated by arrows ── */
+
+.bmap-flow {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 1320px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.bmap-phase {
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--c-border-soft);
+  border-radius: 12px;
+  padding: 10px 14px 12px;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  align-items: center;
+  opacity: 0;
+  animation: bmap-phase-in 0.5s ease-out forwards;
+}
+
+.bmap-phase + .bmap-phase {
+  position: relative;
+}
+
+.bmap-phase + .bmap-phase::before {
+  content: "";
+  position: absolute;
+  top: -14px;
+  left: 50%;
+  width: 2px;
+  height: 14px;
+  background: linear-gradient(180deg, transparent, var(--c-accent));
+}
+
+@keyframes bmap-phase-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.bmap-phase-label {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.bmap-phase-num {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--c-action);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.bmap-phase-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--c-text);
+  letter-spacing: 0.02em;
+}
+
+.bmap-phase-sub {
+  font-size: 0.74rem;
+  color: var(--c-text-muted);
+  line-height: 1.35;
+  margin-top: 2px;
+  max-width: 200px;
+}
+
+.bmap-phase-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bmap-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.bmap-card {
+  position: relative;
+  flex: 1;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 10px 12px 11px;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  box-shadow: 0 1px 2px rgba(13, 41, 34, 0.04), 0 4px 12px rgba(13, 41, 34, 0.06);
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  opacity: 0;
+  animation: bmap-card-in 0.45s ease-out forwards;
+}
+
+@keyframes bmap-card-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.bmap-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.bmap-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-action);
+  background: var(--c-tint);
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+.bmap-arrow {
+  flex: 0 0 36px;
+  align-self: center;
+  color: var(--c-accent);
+  animation: bmap-arrow-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes bmap-arrow-pulse {
+  0%, 100% { opacity: 0.4; transform: translateX(0); }
+  50%      { opacity: 1;   transform: translateX(2px); }
+}
+
+/* Cross-cutting infra strip — sits below the 4 phase rows. */
+.bmap-cross {
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px dashed var(--c-border);
+  border-radius: 12px;
+  padding: 10px 16px;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  align-items: center;
+}
+
+.bmap-cross-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--c-action);
+  text-transform: uppercase;
+}
+
+.bmap-cross-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bmap-cross-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 0.72rem;
+}
+
+.bmap-cross-list strong {
+  color: var(--c-text);
+  font-weight: 700;
+}
+
+.bmap-cross-list span {
+  color: var(--c-text-muted);
+  line-height: 1.3;
+}
+
+.bmap-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--c-accent);
+  box-shadow: 0 4px 14px rgba(18, 191, 160, 0.22);
+}
+
+.bmap-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--c-tint);
+  color: var(--c-action);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--c-border);
+}
+
+.bmap-card-title {
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--c-text);
+  margin-bottom: 2px;
+  line-height: 1.2;
+}
+
+.bmap-card-sub {
+  font-size: 0.74rem;
+  color: var(--c-text-muted);
+  line-height: 1.35;
+}
+
+/* Atrium hero card — sits at the head of Phase 2, accent halo + bigger title. */
+.bmap-agent {
+  background: linear-gradient(180deg, #ffffff 0%, #f3fbf8 100%);
+  border: 1.5px solid var(--c-accent);
+  box-shadow:
+    0 0 0 1px rgba(18, 191, 160, 0.12),
+    0 0 22px rgba(18, 191, 160, 0.22),
+    0 4px 14px rgba(13, 138, 122, 0.10);
+  animation: bmap-card-in 0.45s ease-out forwards, bmap-agent-pulse 3.6s ease-in-out infinite 0.6s;
+}
+
+.bmap-agent .bmap-card-title {
+  font-size: 1.15rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-action);
+}
+
+@keyframes bmap-agent-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(18, 191, 160, 0.12), 0 0 22px rgba(18, 191, 160, 0.22), 0 4px 14px rgba(13, 138, 122, 0.10); }
+  50%      { box-shadow: 0 0 0 1px rgba(18, 191, 160, 0.20), 0 0 36px rgba(18, 191, 160, 0.36), 0 6px 20px rgba(13, 138, 122, 0.14); }
+}
+
+/* iOS-style segmented control — single soft track containing both options.
+   The active option is a raised white card; inactive options blend into the track. */
+.bmap-tabs {
+  display: flex;
+  justify-content: center;
+  padding: 14px 0 0;
+  background: transparent;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.segControl {
+  display: inline-flex;
+  padding: 4px;
+  background: var(--c-tint);
+  border-radius: 10px;
+  position: relative;
+  box-shadow: inset 0 1px 2px rgba(13, 41, 34, 0.06);
+}
+
+.segControl button {
+  position: relative;
+  background: transparent;
+  border: none;
+  color: var(--c-text-muted);
+  padding: 7px 18px;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.01em;
+  transition: color 0.2s ease;
+}
+
+.segControl button:hover:not(.segControl-on) {
+  color: var(--c-action);
+  border-color: transparent;
+}
+
+.segControl button.segControl-on {
+  background: #ffffff;
+  color: var(--c-action);
+  box-shadow:
+    0 1px 2px rgba(13, 41, 34, 0.10),
+    0 4px 10px rgba(13, 41, 34, 0.07);
+  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+@media (max-width: 980px) {
+  .bmap-scene { padding: 20px 18px; }
+  .bmap-phase { grid-template-columns: 1fr; }
+  .bmap-row { flex-direction: column; }
+  .bmap-arrow { transform: rotate(90deg); }
+  .bmap-title { font-size: 1.3rem; }
 }

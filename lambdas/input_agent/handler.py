@@ -586,14 +586,33 @@ def _react_to_estimate(
 ) -> dict[str, Any]:
     """Caller's first turn after we spoke the estimate.
 
-    Their reply is either a reaction ("okay", "sounds good") or a question
-    about the price/service. Either way, acknowledge and ask for their
-    address/area next. We pop the just-captured location-transport slot so
-    the reaction text doesn't pollute the real location value.
+    Their reply is one of:
+      - a quick reaction ("okay", "sounds good")
+      - a question about the price/service (→ KB answer)
+      - the location directly ("Bahnhofstrasse 23, Zurich") if they're
+        eager to keep moving
+
+    For (a) and (b) we pop the location-transport slot so junk text doesn't
+    pollute the real location. For (c) we KEEP the capture, save it, and
+    skip the asking_location beat.
     """
     elicited = _just_elicited_slot(lex_slots, transcript) if transcript else None
     if elicited:
-        lex_slots.pop(elicited, None)
+        payload = lex_slots.get(elicited) or {}
+        raw = (
+            (payload.get("value") or {}).get("interpretedValue")
+            or (payload.get("value") or {}).get("originalValue")
+            or ""
+        ).strip()
+        # Eager-path: caller gave a real location instead of just reacting.
+        if elicited == "location" and raw and _looks_like_location(raw):
+            save_slot_adapter(
+                call_id=call_id, booking_id=booking_id,
+                slot="location", value=raw,
+            )
+            # Leave it in lex_slots so state reflects it below.
+        else:
+            lex_slots.pop(elicited, None)
 
     if transcript:
         _log_caller_turn(call_id, company_id, transcript)
@@ -744,8 +763,12 @@ def _validate_slot_value(slot: str, value: Any) -> Any | None:
     if slot == "area":
         import re as _re
         return s if _re.search(r"\d", s) else None
-    if slot in {"when", "location"}:
+    if slot == "when":
         return s if 0 < len(s) <= 100 else None
+    if slot == "location":
+        # Reject obvious non-locations ("no thanks", "i have a question") via
+        # the same loose plausibility check the asking_location phase uses.
+        return s if _looks_like_location(s) else None
     return None
 
 
@@ -848,13 +871,27 @@ def _slot_filled(state: SlotState, slot: str) -> bool:
     return value not in (None, "")
 
 
+_REACTION_PHRASES = {
+    "yes", "no", "ok", "okay", "sure", "alright", "all right",
+    "fine", "good", "great", "perfect", "thanks", "thank you",
+    "sounds good", "that works", "no thanks", "yes please",
+    "yep", "nope", "yeah", "nah", "uh huh", "mhm",
+}
+
+
 def _looks_like_location(text: str) -> bool:
     """Loose plausibility check for a spoken address / area.
 
-    Used in the asking_location phase to reject captures like 'i have
-    another question' (clearly a follow-up question, not an address).
-    Heuristic: at least 3 characters, at least one alpha, and NOT a
-    standalone question (`_is_question` returns False).
+    Heuristic: at least 3 characters, contains an alpha, NOT a question,
+    NOT in the well-known reaction phrase list, and either contains a
+    digit (street number / PLZ) or has at least two words. Rejects:
+      - "i have another question" (question)
+      - "sounds good" / "no thanks" (reactions, not addresses)
+      - "ok" (too short to identify a place)
+    Accepts:
+      - "Bahnhofstrasse 23, Zurich" (digit)
+      - "Zurich Altstadt" (≥2 words)
+      - "8001 Zurich" (digit + word)
     """
     if not text:
         return False
@@ -863,8 +900,14 @@ def _looks_like_location(text: str) -> bool:
         return False
     if not any(c.isalpha() for c in s):
         return False
-    # Reject obvious "I have another question" style replies.
     if _is_question(s):
+        return False
+    lowered = s.lower().rstrip(".,!?")
+    if lowered in _REACTION_PHRASES:
+        return False
+    has_digit = any(c.isdigit() for c in s)
+    word_count = len(s.split())
+    if not has_digit and word_count < 2:
         return False
     return True
 
