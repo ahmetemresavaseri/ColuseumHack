@@ -1,0 +1,8 @@
+{
+  "PhoneNumber": "+16122600610",
+  "PhoneNumberId": "c761227d-3785-4b0f-aafe-340b35550048",
+  "ContactFlowId": "8d12fa04-dd72-41c8-bcd8-c28b29b44222",
+  "ContactFlowName": "atrium-our-line",
+  "LambdaFunctionArn": "arn:aws:lambda:us-west-2:160659473263:function:AtriumLambdas-InputAgent1523BF8A-sq7Zmsmb5v6U",
+  "LexBotAliasArn": "arn:aws:lex:us-west-2:160659473263:bot-alias/XSPTJR1T5U/CVLOG1AWLO"
+}

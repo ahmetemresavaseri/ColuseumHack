@@ -12,6 +12,7 @@
 **/service-account*.json
 **/google-credentials*.json
 local/credentials/
+local/team_lambda_ref/
 
 # --- Python ---
 __pycache__/

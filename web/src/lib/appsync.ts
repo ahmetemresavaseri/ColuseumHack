@@ -67,11 +67,16 @@ export function subscribeToWallEvents(opts: AppSyncOptions): AppSyncSubscription
   let status: AppSyncStatus = "connecting";
   opts.onStatus?.(status);
 
-  const headerB64 = base64UrlEncode(JSON.stringify(authHeader(opts.graphqlUrl, opts.apiKey)));
-  const payloadB64 = base64UrlEncode("{}");
-  const wsUrl = `${realtimeHost(opts.graphqlUrl)}?header=${headerB64}&payload=${payloadB64}`;
+  // AppSync real-time WebSocket auth is passed as an extra subprotocol named
+  // `header-<base64url(JSON header)>` alongside `graphql-ws`. The older
+  // ?header=&payload= URL-query approach now gets rejected with
+  // "Required headers are missing." in this AppSync API.
+  const headerSubprotocol = `header-${base64UrlEncode(
+    JSON.stringify(authHeader(opts.graphqlUrl, opts.apiKey)),
+  )}`;
+  const wsUrl = realtimeHost(opts.graphqlUrl);
 
-  const ws = new WebSocket(wsUrl, "graphql-ws");
+  const ws = new WebSocket(wsUrl, ["graphql-ws", headerSubprotocol]);
   const subId = crypto.randomUUID?.() ?? `sub-${Math.random().toString(36).slice(2)}`;
   let pingTimer: ReturnType<typeof setInterval> | null = null;
 
