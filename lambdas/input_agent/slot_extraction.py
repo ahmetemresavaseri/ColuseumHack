@@ -210,15 +210,10 @@ def extract_slots_deterministic(text: str, state: SlotState | None = None) -> li
                 tld = voice.group(3).lower()
                 found.append(("email", f"{local}@{domain}.{tld}"))
 
-    # Lex prompts each slot one at a time; if the caller's whole utterance is
-    # just a word-number (e.g. "three" answering "How many rooms?"), accept it
-    # as the next missing slot.
-    if state.rooms is None and not any(s == "rooms" for s, _ in found):
-        bare = WORD_NUMBER_ONLY_RE.match(text)
-        if bare:
-            num = _parse_word_number(bare.group(1))
-            if num is not None:
-                found.append(("rooms", num))
+    # Bare-number utterances ("thirty", "5") are intentionally NOT handled
+    # here — they're context-dependent (caller's "thirty" could be area OR
+    # rooms depending on which slot Lex just prompted). The handler resolves
+    # them in `_clean_lex_slots` using the slot Lex was actively eliciting.
 
     return found
 

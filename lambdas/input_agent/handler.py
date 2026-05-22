@@ -207,6 +207,7 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
         # Read back the brain estimate (computed mid-call) so we can speak
         # the price + feasibility before hanging up.
         close_message = _compose_close_message(booking_id, state)
+        _log_agent_turn(call_id, company_id, close_message)
         if USE_REAL_DDB:
             try:
                 ddb.end_call(call_id, booking_id, reason="completed")
@@ -218,13 +219,37 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
             intent_name=intent.get("name", lex_v2.INTENT_NAME),
         )
 
+    prompt = lex_v2.PROMPTS[next_slot]
+    _log_agent_turn(call_id, company_id, prompt)
     return lex_v2.elicit_slot(
         next_slot,
-        lex_v2.PROMPTS[next_slot],
+        prompt,
         session_attributes=attrs,
         intent_name=intent.get("name", lex_v2.INTENT_NAME),
         intent_slots=lex_slots,
     )
+
+
+def _log_agent_turn(call_id: str, company_id: str, text: str) -> None:
+    """Write the Lambda's spoken response to `Calls#turn#NNNNNN` so the wall
+    shows both sides of the conversation. Lex's built-in TTS reads this
+    message out loud — logging it from the Lambda is the only way the wall
+    sees the agent's side of the transcript.
+    """
+    if not USE_REAL_DDB or not text:
+        return
+    try:
+        meta = ddb.get_call_meta(call_id)
+        seq = int(meta.get("turnSeq") or 0) + 1
+        ddb.append_turn(
+            call_id,
+            seq,
+            "Agent",
+            text,
+            company_id=meta.get("companyId") or company_id,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("agent turn log failed: %s", exc)
 
 
 def _to_lex_slot_value(value: Any) -> dict[str, Any]:
@@ -258,8 +283,14 @@ def _clean_lex_slots(lex_slots: dict[str, Any]) -> tuple[dict[str, Any], list[tu
     """Run each Lex auto-captured slot value through the deterministic extractor.
 
     Lex stores `originalValue=<full caller utterance>` when using
-    AMAZON.FreeFormInput. If the extractor finds a clean canonical value for
-    the *same* slot inside that text, replace the Lex value with ours.
+    AMAZON.FreeFormInput. For each captured value:
+      1. If the regex extractor finds a canonical value for that slot inside
+         the raw text, use it (e.g. "Tomorrow for 85 m²" → when="tomorrow").
+      2. Otherwise, if the slot is `area` or `rooms` and the raw text parses
+         as a bare number (digit or word — "30", "thirty"), use that. This
+         is context-aware: the slot Lex just elicited is the one being
+         filled, so "thirty" answering "How many square meters?" becomes
+         area="30 m2", not rooms=30.
 
     Returns the cleaned dict AND a list of `(slot, canonical_value)` pairs
     that actually got cleaned, so the handler can persist them.
@@ -276,12 +307,37 @@ def _clean_lex_slots(lex_slots: dict[str, Any]) -> tuple[dict[str, Any], list[tu
             continue
         pairs = extract_slots_deterministic(raw, SlotState())
         canonical = next((v for s, v in pairs if s == slot), None)
+        if canonical is None:
+            canonical = _bare_number_fallback(slot, raw)
         if canonical is not None and str(canonical) != raw:
             cleaned[slot] = _to_lex_slot_value(canonical)
             changed.append((slot, canonical))
         else:
             cleaned[slot] = payload
     return cleaned, changed
+
+
+def _bare_number_fallback(slot: str, raw: str) -> Any | None:
+    """For numeric slots, accept a standalone number when Lex elicited them."""
+    if slot not in {"area", "rooms"}:
+        return None
+    text = raw.strip().rstrip(".").lower()
+    # Digit literal first.
+    import re as _re
+    m = _re.match(r"^\s*(\d+(?:\.\d+)?)\s*$", text)
+    if m:
+        n = float(m.group(1))
+        if slot == "area":
+            return f"{n:g} m2"
+        return int(n) if n.is_integer() else n
+    # Word number.
+    from slot_extraction import _parse_word_number  # local import to avoid cycle
+    n = _parse_word_number(text)
+    if n is None:
+        return None
+    if slot == "area":
+        return f"{n} m2"
+    return n
 
 
 def _state_from_lex_slots(lex_slots: dict[str, Any]) -> SlotState:

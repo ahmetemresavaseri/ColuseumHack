@@ -59,12 +59,15 @@ def test_word_number_rooms_with_keyword():
     assert state.rooms == 20
 
 
-def test_bare_word_number_rooms():
-    """Lex prompts each slot one at a time; a bare 'three' should fill rooms."""
+def test_bare_word_number_no_longer_auto_rooms():
+    """A bare 'three' is context-dependent (could be area OR rooms). The
+    transcript extractor must NOT auto-assign it — the handler resolves bare
+    numbers from Lex's slot-elicitation context instead.
+    """
     state = SlotState(when="tomorrow", what="OFFICE_CLEANING", area=85, urgency="high")
     pairs = extract_slots_deterministic("three.", state)
     apply_extractions(state, pairs)
-    assert state.rooms == 3
+    assert state.rooms is None
 
 
 def test_voice_spelled_email():

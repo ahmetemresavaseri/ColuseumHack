@@ -81,6 +81,19 @@ def test_brain_skipped_when_not_configured(monkeypatch):
     assert attrs.get("brainComputed") in (None, "")
 
 
+def test_bare_number_lands_in_elicited_area_not_rooms():
+    """Caller answers 'thirty' to "How many square meters?" — that should
+    fill `area`, not be misassigned to `rooms` by the transcript extractor.
+    """
+    from handler import _bare_number_fallback
+    # Reproduces: Lex captured area="thirty" because area was being elicited.
+    assert _bare_number_fallback("area", "thirty") == "30 m2"
+    assert _bare_number_fallback("rooms", "three") == 3
+    # Other slots: bare-number fallback returns None (don't guess).
+    assert _bare_number_fallback("when", "thirty") is None
+    assert _bare_number_fallback("what", "five") is None
+
+
 def test_lex_keeps_session_attributes_stable_across_turns():
     response_a = handle_lex_event(_lex_event("move out tomorrow"))
     attrs = response_a["sessionState"]["sessionAttributes"]
