@@ -1,29 +1,28 @@
 """Atrium Input Agent Lambda — Phase 1 live call spine.
 
-Routes (API Gateway WebSocket):
-  $connect      — register a connection, no DB writes
-  $disconnect   — close the session, emit CallEnded
-  $default      — text/JSON control messages and PCM frames
+Three entry shapes, dispatched by `lambda_handler`:
 
-Client message contract (text/JSON frames):
-  { "action": "start_call",  ...metadata }
-  { "action": "audio_frame", "frame_b64": "..."  }   # also accepts binary frames
-  { "action": "text_turn",   "text": "..."  }        # local/manual testing
-  { "action": "end_call",    "reason": "..." }
+1. **Connect contact-flow event** (`Details.ContactData`) — initial Lambda
+   invocation from `InvokeLambdaFunction` at the top of the contact flow.
+   Initializes Calls/Bookings rows and returns
+   `{ greeting, callId, bookingId, companyId, locale, ... }` as flat string
+   contact attributes. The contact flow then sets those as Lex session
+   attributes on the `GetCustomerInput` block.
 
-Server message contract (text/JSON frames):
-  { "type": "agent_text", "text": "..."  }
-  { "type": "control",    "control": "agent_speaking_start" | ... }
-  { "type": "<WallEvent>" }                          # mirror of the wall contract
+2. **Lex V2 fulfillment event** (`sessionState` + `inputTranscript`) — fires
+   on every caller turn (DialogCodeHook) and at fulfillment. We extract
+   slots from the transcript, persist them, and tell Lex which slot to
+   elicit next.
 
-The handler routes every state change through a small `emit` callable. In
-production this is closed over `apigatewaymanagementapi.post_to_connection`;
-in tests/local sims it is `events.EventSink`. Either way the JSON shape is
-identical to `web/src/lib/types.ts`.
+3. **WebSocket fallback** (`requestContext.routeKey`) — original browser-mic
+   path kept as a manual-test fallback. Default deployment routes phone
+   calls via Connect+Lex; this path is gated by env (`ENABLE_WS_FALLBACK`)
+   so it can be wired only when explicitly needed.
 
-Database constraint: this handler must not call DynamoDB directly. All slot
-writes go through `slot_adapter.save_slot`; all KB lookups go through
-`tool_dispatcher`. Both have safe no-AWS fallbacks.
+Persistence: every state change goes through `ddb.py` (which is what
+`slot_adapter.py` calls when `DDB_BACKEND=real`). DynamoDB Streams on
+`Calls` and `Bookings` are consumed by `lambdas/stream_to_appsync/handler.py`
+which publishes Wall events to AppSync.
 """
 from __future__ import annotations
 
@@ -31,14 +30,19 @@ import base64
 import json
 import logging
 import os
+import uuid
 from typing import Any, Callable
 
+import connect_event
+import ddb
 import events as wall_events
+import lex_v2
 from bedrock_client import BedrockClaudeClient
 from polly_client import PollyClient
 from session import CallSession, drop_session, get_session, new_session
 from slot_adapter import save_slot as save_slot_adapter
 from slot_extraction import apply_extractions, extract_slots_deterministic
+from slot_state import REQUIRED_SLOTS, SlotState
 from transcribe_client import TranscribeClient
 
 logger = logging.getLogger()
@@ -49,10 +53,305 @@ EmitFn = Callable[[dict[str, Any]], None]
 PERSONA_NAME = os.environ.get("PERSONA_NAME", "Sarah")
 DEFAULT_COMPANY_NAME = os.environ.get("COMPANY_NAME", "Sparkle Cleaning")
 DEFAULT_COMPANY_ID = os.environ.get("COMPANY_ID", "demo-tenant")
+USE_REAL_DDB = os.environ.get("DDB_BACKEND", "mock").lower() == "real"
 
 
 # ---------------------------------------------------------------------------
-# Public API used by tests, local sims, and the real Lambda entry point.
+# Lex V2 path — multi-turn slot collection over the phone via Connect+Lex
+# ---------------------------------------------------------------------------
+
+
+def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[str, Any]:
+    attrs = lex_v2.get_session_attributes(event)
+    first_turn = not attrs.get("callId")
+
+    # When Lex is invoked through Connect, its sessionId IS the Connect
+    # ContactId — which is also what the Connect bootstrap Lambda wrote as
+    # `callId` on Calls#meta. Re-using it lets the Lex code-hook pick up the
+    # tenant context (companyId, caller, locale) that Connect already
+    # resolved, without needing LexSessionAttributes plumbing through the
+    # contact flow (which Connect rejects with InvalidContactFlowException
+    # for `$.External.*` references).
+    lex_session_id = event.get("sessionId") or ""
+    call_id = attrs.get("callId") or lex_session_id or f"call-{uuid.uuid4().hex[:12]}"
+    booking_id = attrs.get("bookingId") or ""
+    company_id = attrs.get("companyId") or DEFAULT_COMPANY_ID
+    caller = attrs.get("caller", "")
+    locale = ""
+    company_name = ""
+
+    if USE_REAL_DDB and first_turn:
+        try:
+            meta = ddb.get_call_meta(call_id)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("get_call_meta failed: %s", exc)
+            meta = {}
+        if meta:
+            company_id = meta.get("companyId") or company_id
+            booking_id = booking_id or meta.get("bookingId") or f"booking-{uuid.uuid4().hex[:12]}"
+            caller = meta.get("caller", caller)
+            locale = meta.get("locale", "")
+            company_name = meta.get("companyName", "")
+        else:
+            booking_id = booking_id or f"booking-{uuid.uuid4().hex[:12]}"
+            try:
+                company = ddb.get_company(company_id) or {}
+                if company:
+                    company_id = company.get("companyId", company_id)
+                    locale = company.get("locale", "")
+                    company_name = company.get("name", "")
+            except Exception as exc:  # pragma: no cover
+                logger.warning("get_company lookup failed: %s", exc)
+
+        try:
+            ddb.start_call(
+                call_id,
+                booking_id,
+                company_id,
+                caller=caller,
+                locale=locale,
+                company_name=company_name,
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Lex first-turn start_call failed: %s", exc)
+    elif not booking_id:
+        booking_id = f"booking-{uuid.uuid4().hex[:12]}"
+
+    # Source of truth for slot values across turns is Lex's `intent.slots`
+    # map (Lambda is stateless; DynamoDB is for the Wall fan-out, not for
+    # rehydrating between Lex hops). We mirror the slots into our SlotState
+    # for the extractor, then write back the updated map.
+    intent = event.get("sessionState", {}).get("intent", {}) or {}
+    lex_slots: dict[str, Any] = dict(intent.get("slots") or {})
+    state = _state_from_lex_slots(lex_slots)
+
+    transcript = lex_v2.get_input_transcript(event)
+    if transcript:
+        pairs = extract_slots_deterministic(transcript, state)
+        accepted = apply_extractions(state, pairs)
+        for slot, value in accepted:
+            save_slot_adapter(
+                call_id=call_id,
+                booking_id=booking_id,
+                slot=slot,
+                value=value,
+            )
+            lex_slots[slot] = _to_lex_slot_value(value)
+
+        if USE_REAL_DDB:
+            try:
+                meta = ddb.get_call_meta(call_id)
+                seq = int(meta.get("turnSeq") or 0) + 1
+                ddb.append_turn(
+                    call_id,
+                    seq,
+                    "Caller",
+                    transcript,
+                    company_id=meta.get("companyId") or company_id,
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("append_turn failed: %s", exc)
+
+    attrs["callId"] = call_id
+    attrs["bookingId"] = booking_id
+    attrs["companyId"] = company_id
+
+    next_slot = next(
+        (s for s in lex_v2.REQUIRED_SLOT_ORDER if not _slot_filled(state, s)),
+        None,
+    )
+
+    if next_slot is None or lex_v2.get_invocation_source(event) == "FulfillmentCodeHook":
+        if USE_REAL_DDB:
+            try:
+                ddb.end_call(call_id, booking_id, reason="completed")
+            except Exception as exc:  # pragma: no cover
+                logger.warning("end_call failed: %s", exc)
+        return lex_v2.close_session(
+            "All set — I have everything I need. Goodbye!",
+            session_attributes=attrs,
+            intent_name=intent.get("name", lex_v2.INTENT_NAME),
+        )
+
+    return lex_v2.elicit_slot(
+        next_slot,
+        lex_v2.PROMPTS[next_slot],
+        session_attributes=attrs,
+        intent_name=intent.get("name", lex_v2.INTENT_NAME),
+        intent_slots=lex_slots,
+    )
+
+
+def _to_lex_slot_value(value: Any) -> dict[str, Any]:
+    """Wrap a raw value in the Lex V2 slot shape."""
+    return {
+        "value": {
+            "originalValue": str(value),
+            "interpretedValue": str(value),
+            "resolvedValues": [str(value)],
+        }
+    }
+
+
+def _state_from_lex_slots(lex_slots: dict[str, Any]) -> SlotState:
+    """Convert Lex's per-turn slot dict back into our SlotState."""
+    flat: dict[str, Any] = {}
+    for slot, payload in lex_slots.items():
+        if isinstance(payload, dict):
+            value = (payload.get("value") or {}).get("interpretedValue")
+        else:
+            value = payload
+        if value is not None and value != "":
+            flat[slot] = value
+    # `area` / `rooms` come back as strings from Lex; SlotState expects raw.
+    return SlotState.from_dict(flat)
+
+
+def _slot_filled(state: SlotState, slot: str) -> bool:
+    value = getattr(state, slot, None)
+    return value not in (None, "")
+
+
+# ---------------------------------------------------------------------------
+# Connect contact-flow path — bootstrap call+booking, return contact attributes
+# ---------------------------------------------------------------------------
+
+
+def handle_connect_event(event: dict[str, Any], context: Any | None = None) -> dict[str, str]:
+    contact_id = connect_event.get_contact_id(event)
+    caller = connect_event.get_caller_phone(event)
+    dialed = connect_event.get_dialed_phone(event)
+
+    company_id = connect_event.get_attribute(event, "companyId") or DEFAULT_COMPANY_ID
+    company: dict[str, Any] = {}
+    if USE_REAL_DDB:
+        try:
+            if dialed:
+                company = ddb.get_company_by_phone_number(dialed) or {}
+            if not company:
+                company = ddb.get_company(company_id) or {}
+            company_id = company.get("companyId", company_id)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("company lookup failed: %s", exc)
+
+    company_name = company.get("name") or DEFAULT_COMPANY_NAME
+    locale = company.get("locale") or os.environ.get("DEFAULT_LOCALE", "en-US")
+    persona = company.get("voicePersonaPrompt") or f"You are {PERSONA_NAME}."
+
+    call_id = contact_id or f"call-{uuid.uuid4().hex[:12]}"
+    booking_id = f"booking-{uuid.uuid4().hex[:12]}"
+
+    if USE_REAL_DDB:
+        try:
+            ddb.start_call(
+                call_id,
+                booking_id,
+                company_id,
+                contact_id=contact_id,
+                caller=caller,
+                locale=locale,
+                company_name=company_name,
+            )
+            ddb.append_turn(
+                call_id,
+                1,
+                "Agent",
+                f"Hello, {company_name}. How can I help you today?",
+                company_id=company_id,
+            )
+        except Exception as exc:  # pragma: no cover - DDB transient
+            logger.warning("start_call failed: %s", exc)
+
+    return connect_event.respond(
+        {
+            "callId": call_id,
+            "bookingId": booking_id,
+            "companyId": company_id,
+            "companyName": company_name,
+            "locale": locale,
+            "persona": persona[:512],
+            "greeting": f"Hello, {company_name}. How can I help you today?",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket fallback (manual testing only) — gated by ENABLE_WS_FALLBACK
+# ---------------------------------------------------------------------------
+
+
+def handle_websocket_event(event: dict[str, Any], context: Any | None = None) -> dict[str, Any]:
+    if os.environ.get("ENABLE_WS_FALLBACK", "0") != "1":
+        # Default deployment doesn't expose this. Keep the code path for
+        # local browser-mic testing.
+        return {"statusCode": 403, "body": "ws_fallback_disabled"}
+
+    rc = event.get("requestContext", {}) or {}
+    route_key = rc.get("routeKey", "$default")
+    connection_id = rc.get("connectionId", "")
+    query = event.get("queryStringParameters") or {}
+    company_id = query.get("company") or query.get("companyId") or DEFAULT_COMPANY_ID
+
+    endpoint = _ws_endpoint(event)
+    emit = _post_emit(connection_id, endpoint)
+
+    if route_key == "$connect":
+        new_session(
+            company_id=company_id,
+            connection_id=connection_id,
+            company_name=query.get("companyName") or DEFAULT_COMPANY_NAME,
+        )
+        return {"statusCode": 200, "body": "connected"}
+
+    session = get_session(connection_id=connection_id)
+
+    if route_key == "$disconnect":
+        if session is not None:
+            handle_end_call(session, emit, reason="disconnect")
+            drop_session(session)
+        return {"statusCode": 200, "body": "disconnected"}
+
+    if session is None:
+        session = new_session(company_id=company_id, connection_id=connection_id)
+
+    _text, raw, parsed = _decode_body(event)
+
+    if parsed is not None and isinstance(parsed, dict):
+        action = parsed.get("action")
+        if action == "start_call":
+            handle_start_call(
+                session,
+                emit,
+                company_name=parsed.get("companyName"),
+                caller=parsed.get("caller"),
+                locale=parsed.get("locale"),
+            )
+            return {"statusCode": 200, "body": "started"}
+        if action == "text_turn":
+            handle_text_turn(session, parsed.get("text", ""), emit)
+            return {"statusCode": 200, "body": "ok"}
+        if action == "end_call":
+            handle_end_call(session, emit, reason=parsed.get("reason", "user_hangup"))
+            drop_session(session)
+            return {"statusCode": 200, "body": "ended"}
+        if action == "audio_frame":
+            frame_b64 = parsed.get("frame_b64") or ""
+            try:
+                raw_frame = base64.b64decode(frame_b64)
+            except Exception:
+                raw_frame = b""
+            handle_audio_frame(session, raw_frame, TranscribeClient())
+            return {"statusCode": 200, "body": "frame_ack"}
+
+    if raw is not None:
+        handle_audio_frame(session, raw, TranscribeClient())
+        return {"statusCode": 200, "body": "frame_ack"}
+
+    return {"statusCode": 200, "body": "ignored"}
+
+
+# ---------------------------------------------------------------------------
+# Local/manual test helpers used by the WS fallback and the simulate script
 # ---------------------------------------------------------------------------
 
 
@@ -83,10 +382,6 @@ def handle_start_call(
 
 
 def handle_text_turn(session: CallSession, text: str, emit: EmitFn) -> None:
-    """Run a finalized caller utterance through slot extraction.
-
-    Phase 1 path; identical to what the Transcribe-driven path calls into.
-    """
     text = (text or "").strip()
     if not text:
         return
@@ -121,7 +416,6 @@ def handle_text_turn(session: CallSession, text: str, emit: EmitFn) -> None:
 
 
 def handle_agent_say(session: CallSession, text: str, emit: EmitFn) -> None:
-    """Emit transcript + agent-speaking control for an agent utterance."""
     if not text:
         return
     seq = session.next_seq()
@@ -139,13 +433,6 @@ def handle_agent_say(session: CallSession, text: str, emit: EmitFn) -> None:
 
 
 def handle_audio_frame(session: CallSession, frame: bytes, transcribe: TranscribeClient) -> None:
-    """Forward a PCM16 frame to Transcribe Streaming.
-
-    Phase 1 leaves the bidirectional stream as a stub; the handler still
-    accepts frames so the wire protocol is exercised end-to-end. The text
-    side of the pipeline (slot extraction, wall events) is reachable via
-    `handle_text_turn` for local testing.
-    """
     if not session.started:
         return
     transcribe.push_audio(frame)
@@ -155,22 +442,15 @@ def handle_end_call(session: CallSession, emit: EmitFn, reason: str = "completed
     if session.ended:
         return
     session.ended = True
-    emit(
-        wall_events.call_ended(
-            session.call_id,
-            session.company_id,
-            reason=reason,
-        )
-    )
+    emit(wall_events.call_ended(session.call_id, session.company_id, reason=reason))
 
 
 # ---------------------------------------------------------------------------
-# Lambda entry point (API Gateway WebSocket)
+# Lambda entry point — pick the right path by event shape
 # ---------------------------------------------------------------------------
 
 
 def _post_emit(connection_id: str, endpoint: str | None) -> EmitFn:
-    """Return an `emit(event)` that posts JSON back to the WS connection."""
     if not endpoint:
         return lambda _evt: None
     try:
@@ -201,7 +481,6 @@ def _ws_endpoint(event: dict[str, Any]) -> str | None:
 
 
 def _decode_body(event: dict[str, Any]) -> tuple[str | None, bytes | None, dict[str, Any] | None]:
-    """Return (text, bytes, parsed_json) for the incoming WS message."""
     body = event.get("body")
     if body is None:
         return None, None, None
@@ -210,7 +489,6 @@ def _decode_body(event: dict[str, Any]) -> tuple[str | None, bytes | None, dict[
             raw = base64.b64decode(body)
         except Exception:
             return None, None, None
-        # Heuristic: if it parses as JSON treat as control message, else PCM.
         try:
             return raw.decode("utf-8"), None, json.loads(raw.decode("utf-8"))
         except Exception:
@@ -223,101 +501,37 @@ def _decode_body(event: dict[str, Any]) -> tuple[str | None, bytes | None, dict[
     return None, None, None
 
 
-def lambda_handler(event, context):  # noqa: ANN001 - Lambda signature
-    logger.info("WS_EVENT %s", json.dumps(event, default=str)[:1500])
+def lambda_handler(event, context):  # noqa: ANN001
+    logger.info("ATRIUM_EVENT %s", json.dumps(event, default=str)[:1500])
 
-    rc = event.get("requestContext", {}) or {}
-    route_key = rc.get("routeKey", "$default")
-    connection_id = rc.get("connectionId", "")
-    query = event.get("queryStringParameters") or {}
-    company_id = query.get("company") or query.get("companyId") or DEFAULT_COMPANY_ID
+    if lex_v2.is_lex_event(event):
+        return handle_lex_event(event, context)
 
-    endpoint = _ws_endpoint(event)
-    emit = _post_emit(connection_id, endpoint)
+    if connect_event.is_connect_event(event):
+        return handle_connect_event(event, context)
 
-    if route_key == "$connect":
-        session = new_session(
-            company_id=company_id,
-            connection_id=connection_id,
-            company_name=query.get("companyName") or DEFAULT_COMPANY_NAME,
-        )
-        logger.info(
-            "CONNECT call_id=%s company_id=%s connection_id=%s",
-            session.call_id,
-            company_id,
-            connection_id,
-        )
-        return {"statusCode": 200, "body": "connected"}
+    if isinstance(event, dict) and "requestContext" in event and "routeKey" in (event.get("requestContext") or {}):
+        return handle_websocket_event(event, context)
 
-    session = get_session(connection_id=connection_id)
-
-    if route_key == "$disconnect":
-        if session is not None:
-            handle_end_call(session, emit, reason="disconnect")
-            drop_session(session)
-        return {"statusCode": 200, "body": "disconnected"}
-
-    # $default / message
-    if session is None:
-        # API Gateway routed a message without a prior $connect; create one.
-        session = new_session(company_id=company_id, connection_id=connection_id)
-
-    _text, raw, parsed = _decode_body(event)
-
-    if parsed is not None and isinstance(parsed, dict):
-        action = parsed.get("action")
-        if action == "start_call":
-            handle_start_call(
-                session,
-                emit,
-                company_name=parsed.get("companyName"),
-                caller=parsed.get("caller"),
-                locale=parsed.get("locale"),
-            )
-            return {"statusCode": 200, "body": "started"}
-        if action == "text_turn":
-            handle_text_turn(session, parsed.get("text", ""), emit)
-            return {"statusCode": 200, "body": "ok"}
-        if action == "end_call":
-            handle_end_call(session, emit, reason=parsed.get("reason", "user_hangup"))
-            drop_session(session)
-            return {"statusCode": 200, "body": "ended"}
-        if action == "audio_frame":
-            frame_b64 = parsed.get("frame_b64") or ""
-            try:
-                raw_frame = base64.b64decode(frame_b64)
-            except Exception:
-                raw_frame = b""
-            handle_audio_frame(session, raw_frame, TranscribeClient())
-            return {"statusCode": 200, "body": "frame_ack"}
-
-    if raw is not None:
-        # Binary PCM frame.
-        handle_audio_frame(session, raw, TranscribeClient())
-        return {"statusCode": 200, "body": "frame_ack"}
-
-    return {"statusCode": 200, "body": "ignored"}
+    return {"statusCode": 400, "body": "unrecognized_event"}
 
 
-# Keep the legacy alias for existing wiring.
+# Legacy alias
 handler = lambda_handler
 
 
 # ---------------------------------------------------------------------------
-# Convenience for local simulators and tests
+# Local-only helper for tests / simulators (no AWS dependency)
 # ---------------------------------------------------------------------------
 
 
 def make_local_session(company_id: str = DEFAULT_COMPANY_ID) -> tuple[CallSession, wall_events.EventSink]:
-    """Create a session + in-memory event sink for local testing.
-
-    Phase 1 voice work still in progress: Bedrock Converse + Polly + the
-    Transcribe bidi stream are wired through their respective `*_client.py`
-    boundaries but the live audio path is not exercised from here. Use this
-    helper to drive the text-turn path deterministically.
-    """
-    _ = BedrockClaudeClient()  # surfaces the import so it can be wired later
+    _ = BedrockClaudeClient()  # boundary import is intentional
     _ = PollyClient()
     sink = wall_events.EventSink()
     session = new_session(company_id=company_id)
     return session, sink
+
+
+# Quiet noqa for unused REQUIRED_SLOTS re-export (still useful elsewhere).
+_ = REQUIRED_SLOTS

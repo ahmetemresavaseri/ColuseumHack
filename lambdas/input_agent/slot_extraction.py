@@ -78,6 +78,16 @@ ROOMS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Lex transcribes spoken numbers as words ("four rooms"); cover one to ten.
+WORD_NUMBERS: dict[str, int] = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+WORD_ROOMS_RE = re.compile(
+    r"\b(" + "|".join(WORD_NUMBERS) + r")\s+(?:rooms?|bedrooms?)\b",
+    re.IGNORECASE,
+)
+
 
 def extract_slots_deterministic(text: str, state: SlotState | None = None) -> list[SlotPair]:
     """Pull as many slots out of a single utterance as we can without Claude.
@@ -120,6 +130,10 @@ def extract_slots_deterministic(text: str, state: SlotState | None = None) -> li
                 found.append(("rooms", rooms_int))
             except ValueError:
                 pass
+        else:
+            word_match = WORD_ROOMS_RE.search(text)
+            if word_match:
+                found.append(("rooms", WORD_NUMBERS[word_match.group(1).lower()]))
 
     if not state.urgency:
         for needle, label in URGENCY_KEYWORDS:

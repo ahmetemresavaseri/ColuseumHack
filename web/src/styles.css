@@ -132,6 +132,17 @@ code {
   border-radius: 4px;
 }
 
+.callPrompt {
+  margin-top: 6px;
+  color: #1b5e4f;
+  font-size: 0.95rem;
+}
+
+.callPrompt strong {
+  font-family: ui-monospace, SFMono-Regular, "Courier New", monospace;
+  letter-spacing: 0.02em;
+}
+
 @media (max-width: 760px) {
   .wall {
     padding: 18px;

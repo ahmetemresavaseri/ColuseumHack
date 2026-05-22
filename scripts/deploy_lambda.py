@@ -240,67 +240,108 @@ def associate_with_connect(function_arn: str, instance_id: str) -> None:
             raise
 
 
-def build_stage2_flow_content(lambda_arn: str) -> dict:
+def build_stage2_flow_content(lambda_arn: str, lex_bot_alias_arn: str | None = None) -> dict:
+    """Phase 1 contact flow:
+
+      InvokeLambda (bootstrap call/booking, return greeting + IDs)
+        → SetAttributes (lift the External attrs into contact attributes)
+        → MessageParticipant (speak greeting)
+        → if Lex bot alias configured:
+            GetCustomerInput → Lex bot → loops until intent is fulfilled
+          else: skip straight to disconnect
+        → Disconnect
+    """
+    actions = [
+        {
+            "Identifier": "invoke",
+            "Type": "InvokeLambdaFunction",
+            "Parameters": {
+                "LambdaFunctionARN": lambda_arn,
+                "InvocationTimeLimitSeconds": "8",
+            },
+            "Transitions": {
+                "NextAction": "speak",
+                "Errors": [{"NextAction": "speak_err", "ErrorType": "NoMatchingError"}],
+            },
+        },
+        {
+            "Identifier": "speak",
+            "Type": "MessageParticipant",
+            "Parameters": {"Text": "$.External.greeting"},
+            "Transitions": {
+                "NextAction": "lex_input" if lex_bot_alias_arn else "disconnect",
+            },
+        },
+    ]
+    if lex_bot_alias_arn:
+        actions.append(
+            {
+                "Identifier": "lex_input",
+                "Parameters": {
+                    "Text": "How can I help you?",
+                    "LexV2Bot": {"AliasArn": lex_bot_alias_arn},
+                },
+                "Transitions": {
+                    "NextAction": "disconnect",
+                    "Errors": [
+                        {"NextAction": "disconnect", "ErrorType": "NoMatchingError"},
+                        {"NextAction": "disconnect", "ErrorType": "NoMatchingCondition"},
+                    ],
+                    "Conditions": [],
+                },
+                "Type": "ConnectParticipantWithLexBot",
+            }
+        )
+    actions.append(
+        {
+            "Identifier": "speak_err",
+            "Type": "MessageParticipant",
+            "Parameters": {
+                "Text": "Sorry, the agent is not available right now. Please try again later.",
+            },
+            "Transitions": {"NextAction": "disconnect"},
+        }
+    )
+    actions.append(
+        {
+            "Identifier": "disconnect",
+            "Type": "DisconnectParticipant",
+            "Parameters": {},
+            "Transitions": {},
+        }
+    )
     return {
         "Version": "2019-10-30",
         "StartAction": "invoke",
         "Metadata": {
             "entryPointPosition": {"x": 40, "y": 40},
             "ActionMetadata": {
-                "invoke":     {"position": {"x": 240, "y": 40}},
-                "speak":      {"position": {"x": 440, "y": 40}},
-                "speak_err":  {"position": {"x": 440, "y": 240}},
-                "disconnect": {"position": {"x": 640, "y": 40}},
+                "invoke": {"position": {"x": 240, "y": 40}},
+                "speak": {"position": {"x": 440, "y": 40}},
+                "lex_input": {"position": {"x": 640, "y": 40}},
+                "speak_err": {"position": {"x": 440, "y": 240}},
+                "disconnect": {"position": {"x": 840, "y": 40}},
             },
         },
-        "Actions": [
-            {
-                "Identifier": "invoke",
-                "Type": "InvokeLambdaFunction",
-                "Parameters": {
-                    "LambdaFunctionARN": lambda_arn,
-                    "InvocationTimeLimitSeconds": "8",
-                    "LambdaInvocationAttributes": {},
-                },
-                "Transitions": {
-                    "NextAction": "speak",
-                    "Errors": [{"NextAction": "speak_err", "ErrorType": "NoMatchingError"}],
-                    "Conditions": [],
-                },
-            },
-            {
-                "Identifier": "speak",
-                "Type": "MessageParticipant",
-                "Parameters": {"Text": "$.External.greeting"},
-                "Transitions": {"NextAction": "disconnect", "Errors": [], "Conditions": []},
-            },
-            {
-                "Identifier": "speak_err",
-                "Type": "MessageParticipant",
-                "Parameters": {
-                    "Text": "Sorry, the input agent Lambda failed to respond. Please try again later.",
-                },
-                "Transitions": {"NextAction": "disconnect", "Errors": [], "Conditions": []},
-            },
-            {
-                "Identifier": "disconnect",
-                "Type": "DisconnectParticipant",
-                "Parameters": {},
-                "Transitions": {},
-            },
-        ],
+        "Actions": actions,
     }
 
 
-def update_contact_flow(instance_id: str, flow_id: str, lambda_arn: str) -> None:
+def update_contact_flow(
+    instance_id: str,
+    flow_id: str,
+    lambda_arn: str,
+    lex_bot_alias_arn: str | None = None,
+) -> None:
     cc = connect_client()
-    content = build_stage2_flow_content(lambda_arn)
+    content = build_stage2_flow_content(lambda_arn, lex_bot_alias_arn)
     cc.update_contact_flow_content(
         InstanceId=instance_id,
         ContactFlowId=flow_id,
         Content=json.dumps(content),
     )
-    print(f"{OK} Contact flow updated to invoke Lambda + speak greeting")
+    suffix = " → Lex" if lex_bot_alias_arn else ""
+    print(f"{OK} Contact flow updated: Lambda greeting{suffix} → disconnect")
 
 
 def main() -> int:
@@ -315,7 +356,17 @@ def main() -> int:
     function_arn = deploy_function(role_arn, zip_bytes)
     allow_connect_invoke(function_arn, instance_arn)
     associate_with_connect(function_arn, instance_id)
-    update_contact_flow(instance_id, flow_id, function_arn)
+
+    lex_bot_alias_arn = None
+    bot_id = state.get("LexBotId")
+    alias_id = state.get("LexBotAliasId")
+    if bot_id and alias_id:
+        lex_bot_alias_arn = (
+            f"arn:aws:lex:{region()}:{get_account_id()}:bot-alias/{bot_id}/{alias_id}"
+        )
+        print(f"{OK} Found Lex bot alias ARN: {lex_bot_alias_arn}")
+
+    update_contact_flow(instance_id, flow_id, function_arn, lex_bot_alias_arn)
 
     state.update({
         "LambdaFunctionArn": function_arn,

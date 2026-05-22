@@ -8,14 +8,30 @@ import { SlotsPane } from "./components/SlotsPane";
 import { TranscriptPane } from "./components/TranscriptPane";
 import { emptyCall, reduceCall } from "./lib/callState";
 import { playMockEventScript, type MockEventHandle } from "./lib/mockEvents";
-import { startAudioCall, type AudioCallStatus, type AudioClientHandle } from "./lib/audioClient";
-import { connectWall, type WallClientHandle, type WallConnectionStatus } from "./lib/wallClient";
+import {
+  startAudioCall,
+  type AudioCallStatus,
+  type AudioClientHandle,
+} from "./lib/audioClient";
+import {
+  connectWall,
+  type WallClientHandle,
+  type WallConnectionStatus,
+} from "./lib/wallClient";
+import {
+  subscribeToWallEvents,
+  type AppSyncStatus,
+  type AppSyncSubscriptionHandle,
+} from "./lib/appsync";
 import type { LiveCall, WallEvent } from "./lib/types";
 
 type EnvBag = {
-  audioWsUrl?: string;
+  appsyncUrl?: string;
+  appsyncApiKey?: string;
   wallWsUrl?: string;
   wallApiUrl?: string;
+  audioWsUrl?: string;
+  phoneNumber?: string;
   companyId: string;
   companyName: string;
 };
@@ -23,9 +39,12 @@ type EnvBag = {
 function readEnv(): EnvBag {
   const env = (import.meta as ImportMeta & { env: Record<string, string | undefined> }).env;
   return {
-    audioWsUrl: env.VITE_AUDIO_WS_URL,
+    appsyncUrl: env.VITE_APPSYNC_GRAPHQL_URL,
+    appsyncApiKey: env.VITE_APPSYNC_API_KEY,
     wallWsUrl: env.VITE_WALL_WS_URL,
     wallApiUrl: env.VITE_WALL_API_URL,
+    audioWsUrl: env.VITE_AUDIO_WS_URL,
+    phoneNumber: env.VITE_CONNECT_PHONE_NUMBER,
     companyId: env.VITE_COMPANY_ID || "glanz-ag",
     companyName: env.VITE_COMPANY_NAME || "Glanz AG",
   };
@@ -51,37 +70,59 @@ export default function CallWall() {
     undefined,
     () => emptyCall(envBag.companyId, envBag.companyName),
   );
-  const [wallStatus, setWallStatus] = useState<WallConnectionStatus>("idle");
+  const [wallStatus, setWallStatus] = useState<string>("idle");
   const [audioStatus, setAudioStatus] = useState<AudioCallStatus>("idle");
   const audioRef = useRef<AudioClientHandle | null>(null);
   const mockRef = useRef<MockEventHandle | null>(null);
 
-  // Wall transport: WS if configured, polling if only REST is configured,
-  // otherwise idle and the user can hit Simulate to play the local mock.
+  // Transport preference: AppSync subscription (default) > Wall WS > Wall REST
+  // polling > idle (mock-only). Pick whichever is configured.
   useEffect(() => {
-    if (!envBag.wallWsUrl && !envBag.wallApiUrl) {
-      setWallStatus("idle");
-      return;
+    const onEvent = (event: WallEvent) => dispatch({ kind: "event", event });
+    if (envBag.appsyncUrl && envBag.appsyncApiKey) {
+      const handle: AppSyncSubscriptionHandle = subscribeToWallEvents({
+        graphqlUrl: envBag.appsyncUrl,
+        apiKey: envBag.appsyncApiKey,
+        companyId: envBag.companyId,
+        onEvent,
+        onStatus: (s: AppSyncStatus) => setWallStatus(`appsync:${s}`),
+      });
+      return () => handle.close();
     }
-    const handle: WallClientHandle = connectWall({
-      url: envBag.wallWsUrl,
-      pollUrl: envBag.wallApiUrl,
-      companyId: envBag.companyId,
-      onEvent: (event) => dispatch({ kind: "event", event }),
-      onStatus: setWallStatus,
-    });
-    return () => handle.close();
-  }, [envBag.wallWsUrl, envBag.wallApiUrl, envBag.companyId]);
+    if (envBag.wallWsUrl || envBag.wallApiUrl) {
+      const handle: WallClientHandle = connectWall({
+        url: envBag.wallWsUrl,
+        pollUrl: envBag.wallApiUrl,
+        companyId: envBag.companyId,
+        onEvent,
+        onStatus: (s: WallConnectionStatus) => setWallStatus(`wall:${s}`),
+      });
+      return () => handle.close();
+    }
+    setWallStatus("idle");
+  }, [
+    envBag.appsyncUrl,
+    envBag.appsyncApiKey,
+    envBag.wallWsUrl,
+    envBag.wallApiUrl,
+    envBag.companyId,
+  ]);
 
   const handleClear = useCallback(() => {
     mockRef.current?.cancel();
     mockRef.current = null;
-    dispatch({ kind: "reset", call: emptyCall(envBag.companyId, envBag.companyName) });
+    dispatch({
+      kind: "reset",
+      call: emptyCall(envBag.companyId, envBag.companyName),
+    });
   }, [envBag.companyId, envBag.companyName]);
 
   const handleSimulate = useCallback(() => {
     mockRef.current?.cancel();
-    dispatch({ kind: "reset", call: emptyCall(envBag.companyId, envBag.companyName) });
+    dispatch({
+      kind: "reset",
+      call: emptyCall(envBag.companyId, envBag.companyName),
+    });
     mockRef.current = playMockEventScript((event) =>
       dispatch({ kind: "event", event }),
     );
@@ -118,12 +159,18 @@ export default function CallWall() {
     audioRef.current = null;
   }, []);
 
-  useEffect(() => () => {
-    audioRef.current?.hangUp();
-    mockRef.current?.cancel();
-  }, []);
+  useEffect(
+    () => () => {
+      audioRef.current?.hangUp();
+      mockRef.current?.cancel();
+    },
+    [],
+  );
 
-  const inCall = audioStatus === "live" || audioStatus === "connecting" || audioStatus === "requesting-mic";
+  const inCall =
+    audioStatus === "live" ||
+    audioStatus === "connecting" ||
+    audioStatus === "requesting-mic";
 
   return (
     <main className="wall">
@@ -131,12 +178,18 @@ export default function CallWall() {
         <div>
           <p className="eyebrow">Atrium Live Call Wall</p>
           <h1>{call.companyName}</h1>
-          {!envBag.audioWsUrl && !envBag.wallWsUrl && !envBag.wallApiUrl ? (
-            <p className="placeholder">
-              Demo mode — set <code>VITE_AUDIO_WS_URL</code> and{" "}
-              <code>VITE_WALL_WS_URL</code> to connect to real AWS endpoints.
+          {envBag.phoneNumber ? (
+            <p className="callPrompt">
+              Call this number to start the demo:{" "}
+              <strong>{envBag.phoneNumber}</strong>
             </p>
-          ) : null}
+          ) : (
+            <p className="placeholder">
+              Phone number not configured —{" "}
+              <code>VITE_CONNECT_PHONE_NUMBER</code>. The Wall still listens for
+              live events from AppSync.
+            </p>
+          )}
         </div>
         <DemoControls
           onCallNow={handleCallNow}

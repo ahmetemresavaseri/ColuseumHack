@@ -1,7 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"import sys; sys.path.insert\\(0, 'lambdas/input_agent'\\); import handler; print\\('handler OK'\\); import events; print\\('events OK'\\); import tool_dispatcher; print\\('tool_dispatcher OK'\\)\")"
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'lambdas/input_agent'\\); import handler; print\\('handler OK'\\); import events; print\\('events OK'\\); import tool_dispatcher; print\\('tool_dispatcher OK'\\)\")",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python infrastructure/cdk_app.py)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(python -m pytest tests/ -q)",
+      "PowerShell(aws --version)",
+      "PowerShell(cdk --version)",
+      "PowerShell(python --version)",
+      "Bash(npm install *)",
+      "Bash(cdk --version)",
+      "Bash(export AWS_DEFAULT_REGION=\"us-west-2\")",
+      "Bash(export AWS_REGION=\"us-west-2\")",
+      "Bash(export AWS_ACCESS_KEY_ID=\"ASIA532XYTKRVKLFRBGT\")",
+      "Bash(export AWS_SECRET_ACCESS_KEY=\"2wqMvuSTqN0Dq9xsjH0hyp5RCsvHEgaV/Y2dlDJQ\")",
+      "Bash(export AWS_SESSION_TOKEN=\"IQoJb3JpZ2luX2VjED0aCXVzLWVhc3QtMSJHMEUCIDrPTrVqwbzWJck0/n9mucMCJ2KdQqRz3FmGAbhr7gqeAiEAsZ7ngY+8RDG6BaQIB2UGHzocqyK+V1HmiOYzhjML360qmQIIBRAAGgw5NTMxMjk5MzM0NzUiDKuK3SfO6yfU9ugtzCr2AT2a60YEMlY8cTySdEecWMRMBXAKKomJT5iErxsBklwL+PeTtYeBrCIQTBlxrdXtpPIDDEPFdKGrEHEx10HiQytC7xbGXxiDNFKSSEmHDotX2YW2ERzK+PB5dSOUiiG99iZDXS1qJuiJPVExqf5pnirIhXAePq9S0jAgRryto4Hhw0vliVFJ6xkjCXCHhfwIHs1oU02P/Z5Y8Nl+YaJW885JgjLBl+rKIngjSjVCSLTEE5ToXaTzdZctWgEJmbFlDJZCfDLcvUOFzq0nb7Zkrp8YDnh0q1ta6EtVLWUW4h1bNVzbAc0PgfKzQKeDP1/ezUjtTURp6DDw7bvQBjqdAQuzzKUhUEq7oxlZhmmkGHZ/9GkApVsCAEkU9x+dvPFVmOkXpFiHzPSHIId3FanDb4b93Fhj+Yzm5kCIUW9CTl2+hyO0Pil+ZiuxcdnZ900Wyx1CsaxIihWI3Y0shiZT2R0XP7M0F1bBv8qmz8WwibeGoUOGrgZ3XiKbyGvAEVTq6T8FhszO9Zfw5LTyy5TlOXBKhDVraP2qhl/HsfA=\")"
     ]
   }
 }

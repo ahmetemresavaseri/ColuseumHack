@@ -7,6 +7,9 @@ export type DemoControlsProps = {
   inCall: boolean;
 };
 
+// "Call now" is the *fallback* browser-mic path. The primary phone demo is the
+// claimed Amazon Connect number; this control only appears when explicitly
+// wired via `VITE_AUDIO_WS_URL`.
 export function DemoControls({
   onCallNow,
   onHangUp,
@@ -17,31 +20,25 @@ export function DemoControls({
 }: DemoControlsProps) {
   return (
     <div className="controls">
-      {inCall ? (
-        <button type="button" onClick={onHangUp} className="primary">
-          Hang up
-        </button>
-      ) : (
-        <button
-          type="button"
-          onClick={onCallNow}
-          disabled={!canCall}
-          className="primary"
-          title={
-            canCall
-              ? "Open mic and connect to the Atrium voice agent"
-              : "Set VITE_AUDIO_WS_URL to enable Call now"
-          }
-        >
-          Call now
-        </button>
-      )}
-      <button type="button" onClick={onSimulate}>
+      <button type="button" onClick={onSimulate} className="primary">
         Simulate
       </button>
       <button type="button" onClick={onClear}>
         Clear
       </button>
+      {inCall ? (
+        <button type="button" onClick={onHangUp}>
+          Hang up (mic)
+        </button>
+      ) : canCall ? (
+        <button
+          type="button"
+          onClick={onCallNow}
+          title="Fallback only — use the Connect phone number for the real demo"
+        >
+          Call via mic
+        </button>
+      ) : null}
     </div>
   );
 }
