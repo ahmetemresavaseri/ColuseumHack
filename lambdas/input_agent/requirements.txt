@@ -1,3 +1,2 @@
 # Lambda runtime ships boto3, so it's not pinned here for Stage 2.
-# Stage 3 will add: amazon-transcribe (HTTP/2 streaming SDK), and any
-# audio resampling deps needed for the PCM <-> Polly MP3 round-trip.
+# Stage 3 will add audio + KVS deps.

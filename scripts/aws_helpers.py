@@ -1,10 +1,4 @@
-"""Shared boto3 client factories + identity helpers for the Atrium project.
-
-Only services on the hackathon allow-list are exposed here. Notably absent
-(and deliberately so): `connect`, `qconnect` — Amazon Connect / Q-in-Connect
-are NOT on the allow-list for this event; Atrium uses a Browser-WebRTC
-front door instead. See the plan, section "Architecture".
-"""
+"""Shared boto3 client factories + identity helpers for the Atrium project."""
 from __future__ import annotations
 
 import os
@@ -59,13 +53,8 @@ def bedrock_runtime():
 
 
 @lru_cache(maxsize=1)
-def polly():
-    return boto3.client("polly", config=_default_config)
-
-
-@lru_cache(maxsize=1)
-def transcribe_streaming():
-    return boto3.client("transcribe-streaming", config=_default_config)
+def connect_client():
+    return boto3.client("connect", config=_default_config)
 
 
 @lru_cache(maxsize=1)
@@ -81,13 +70,3 @@ def iam():
 @lru_cache(maxsize=1)
 def logs():
     return boto3.client("logs", config=_default_config)
-
-
-@lru_cache(maxsize=1)
-def apigatewayv2():
-    return boto3.client("apigatewayv2", config=_default_config)
-
-
-@lru_cache(maxsize=1)
-def dynamodb():
-    return boto3.client("dynamodb", config=_default_config)

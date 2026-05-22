@@ -1,28 +1,19 @@
-"""DEPRECATED — Q in Connect is NOT on the hackathon allow-list.
+"""Stage 3 — provision Amazon Q in Connect assistant + AI Agent (ORCHESTRATION).
 
-This script provisioned a Q-in-Connect (`qconnect`) assistant + AI Agent
-(ORCHESTRATION) for the Connect contact flow. As of 2026-05-22 the Atrium
-hackathon build uses **direct Bedrock Claude Sonnet 4.6 invocations** from the
-Input Agent Lambda (see lambdas/input_agent/handler.py) instead of routing
-through Q-in-Connect — `qconnect` is not on the event's allowed-services list.
+Uses the ORCHESTRATION agent type (the one Connect's Voice-AI integration actually invokes),
+not SELF_SERVICE. The persona/system-prompt comes from prompts/sarah_orchestration.yaml
+in the canonical Q-in-Connect YAML format.
 
-The persona / 6-slot system prompt lives in `prompts/sarah_orchestration.yaml`
-and is loaded directly by the Input Agent Lambda at start-up.
+Stage 3a — no tools yet. We verify Sarah speaks before wiring tool-use.
+Stage 5 will rewrite this script to add the 4 RETURN_TO_CONTROL tools.
 
-Kept in the repo for the post-hackathon Connect drop-in roadmap item. Do NOT
-run during the hackathon.
+Idempotent. Writes results to scripts/.connect_state.json.
 """
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
-
-raise SystemExit(
-    "provision_ai_agent.py is DEPRECATED for the hackathon — Q in Connect "
-    "(qconnect) is not on the allow-list. The persona prompt is loaded "
-    "directly by lambdas/input_agent/handler.py from prompts/sarah_orchestration.yaml."
-)
 
 sys.path.insert(0, str(Path(__file__).parent))
 
