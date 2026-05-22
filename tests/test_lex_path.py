@@ -55,6 +55,7 @@ def test_lex_completes_when_all_slots_filled():
     transcripts = [
         "I need a move-out cleaning tomorrow for 85 m2, urgent, customer@example.com",
         "4 rooms",
+        "no thanks",  # Reply to the post-slot "any questions?" prompt
     ]
     for transcript in transcripts:
         response = handle_lex_event(_lex_event(transcript, attrs, slots))
@@ -89,9 +90,19 @@ def test_bare_number_lands_in_elicited_area_not_rooms():
     # Reproduces: Lex captured area="thirty" because area was being elicited.
     assert _bare_number_fallback("area", "thirty") == "30 m2"
     assert _bare_number_fallback("rooms", "three") == 3
-    # Other slots: bare-number fallback returns None (don't guess).
-    assert _bare_number_fallback("when", "thirty") is None
+    # what stays None — service type needs canonical mapping.
     assert _bare_number_fallback("what", "five") is None
+
+
+def test_when_fallback_accepts_free_text():
+    """'in three days', 'next monday morning' — calendar phrases don't match
+    our keyword list but must still flow through to Bookings.slots."""
+    from handler import _bare_number_fallback
+    assert _bare_number_fallback("when", "in three days") == "in three days"
+    assert _bare_number_fallback("when", "next monday morning") == "next monday morning"
+    # Sentence-length text is rejected (probably a missed-question FAQ).
+    long_text = "x " * 50
+    assert _bare_number_fallback("when", long_text) is None
 
 
 def test_lex_keeps_session_attributes_stable_across_turns():

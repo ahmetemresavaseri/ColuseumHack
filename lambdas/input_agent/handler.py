@@ -135,6 +135,23 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
 
     transcript = lex_v2.get_input_transcript(event)
 
+    # If the prior turn asked "any questions?" (post-slot-collection beat),
+    # interpret this turn against the questions phase rather than slot input.
+    if attrs.get("questionsPrompted") == "1":
+        if transcript and _is_question(transcript):
+            return _handle_faq_turn(
+                transcript=transcript, event=event, intent=intent,
+                lex_slots=lex_slots, attrs=attrs,
+                call_id=call_id, booking_id=booking_id, company_id=company_id,
+                final=True,
+            )
+        # "no thanks" / silence / anything else — close cleanly.
+        return _finalize_after_questions(
+            transcript=transcript, event=event, intent=intent,
+            lex_slots=lex_slots, attrs=attrs,
+            call_id=call_id, booking_id=booking_id, company_id=company_id,
+        )
+
     # Phase 3 RAG: if the caller asked a question mid-elicitation, answer it
     # from the tenant KB BEFORE the slot pipeline can mistake it for slot
     # input. Return early so we don't pollute the booking with the question.
@@ -158,10 +175,25 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     # otherwise the cleaned values only live in Lex's session and never reach
     # the SlotSaved stream.
     lex_slots, cleaned_pairs = _clean_lex_slots(lex_slots)
+    cleaned_slot_names = {s for s, _ in cleaned_pairs}
     for slot, value in cleaned_pairs:
         save_slot_adapter(
             call_id=call_id, booking_id=booking_id, slot=slot, value=value,
         )
+    # If Lex just elicited a slot but the cleaner didn't normalize it (because
+    # the raw text is already its own canonical form, e.g. when="in three
+    # days"), persist the raw value once so the wall actually shows it.
+    elicited_this_turn = _just_elicited_slot(lex_slots, transcript) if transcript else None
+    if elicited_this_turn and elicited_this_turn not in cleaned_slot_names:
+        payload = lex_slots.get(elicited_this_turn) or {}
+        value_dict = (payload.get("value") or {}) if isinstance(payload, dict) else {}
+        raw = (value_dict.get("interpretedValue") or value_dict.get("originalValue") or "").strip()
+        if raw:
+            save_slot_adapter(
+                call_id=call_id, booking_id=booking_id,
+                slot=elicited_this_turn, value=raw,
+            )
+
     state = _state_from_lex_slots(lex_slots)
 
     if transcript:
@@ -221,6 +253,27 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     )
 
     if next_slot is None or lex_v2.get_invocation_source(event) == "FulfillmentCodeHook":
+        # Once: give the caller a chance to ask anything before we close.
+        # The next turn's transcript either trips our FAQ branch (handled at
+        # the top of this function and returns a Close) or is treated as
+        # "no thanks" and we close here on the second pass.
+        if attrs.get("questionsPrompted") != "1":
+            attrs["questionsPrompted"] = "1"
+            prompt = (
+                "Before we wrap up — do you have any questions about our "
+                "services, pricing, or scheduling?"
+            )
+            _log_agent_turn(call_id, company_id, prompt)
+            return lex_v2.elicit_slot(
+                # Re-elicit the last filled slot purely as a transport for the
+                # prompt; the caller's reply is intercepted next turn.
+                "email",
+                prompt,
+                session_attributes=attrs,
+                intent_name=intent.get("name", lex_v2.INTENT_NAME),
+                intent_slots=lex_slots,
+            )
+
         # Read back the brain estimate (computed mid-call) so we can speak
         # the price + feasibility before hanging up.
         close_message = _compose_close_message(booking_id, state)
@@ -385,9 +438,15 @@ def _handle_faq_turn(
     call_id: str,
     booking_id: str,
     company_id: str,
+    final: bool = False,
 ) -> dict[str, Any]:
-    """Answer a caller question from KB, then re-elicit the slot Lex was
-    asking about so the booking flow resumes."""
+    """Answer a caller question from KB.
+
+    `final=False` (default) — re-elicit the slot Lex was asking about so the
+    booking flow resumes. Used when caller interrupts mid-elicitation.
+    `final=True` — the call is already past slot collection (the post-slot
+    "any questions?" beat); answer + close + speak the price summary.
+    """
     # Don't let Lex's auto-capture of the question pollute the slot.
     elicited = _just_elicited_slot(lex_slots, transcript)
     if elicited:
@@ -399,6 +458,27 @@ def _handle_faq_turn(
     answer, citations = _compose_faq_answer(kb_result)
 
     state = _state_from_lex_slots(lex_slots)
+    attrs["callId"] = call_id
+    attrs["bookingId"] = booking_id
+    attrs["companyId"] = company_id
+
+    if final:
+        # We're in the "any questions?" phase — answer + speak the closing
+        # price summary in one breath, then hang up.
+        close_tail = _compose_close_message(booking_id, state)
+        response_text = f"{answer} {close_tail}"
+        _log_agent_turn(call_id, company_id, response_text, citations=citations)
+        if USE_REAL_DDB:
+            try:
+                ddb.end_call(call_id, booking_id, reason="completed")
+            except Exception as exc:  # pragma: no cover
+                logger.warning("end_call failed: %s", exc)
+        return lex_v2.close_session(
+            response_text,
+            session_attributes=attrs,
+            intent_name=intent.get("name", lex_v2.INTENT_NAME),
+        )
+
     next_slot = next(
         (s for s in lex_v2.REQUIRED_SLOT_ORDER if not _slot_filled(state, s)),
         None,
@@ -412,10 +492,6 @@ def _handle_faq_turn(
 
     _log_agent_turn(call_id, company_id, response_text, citations=citations)
 
-    attrs["callId"] = call_id
-    attrs["bookingId"] = booking_id
-    attrs["companyId"] = company_id
-
     if slot_to_elicit:
         return lex_v2.elicit_slot(
             slot_to_elicit, response_text,
@@ -425,6 +501,51 @@ def _handle_faq_turn(
         )
     return lex_v2.close_session(
         response_text,
+        session_attributes=attrs,
+        intent_name=intent.get("name", lex_v2.INTENT_NAME),
+    )
+
+
+def _finalize_after_questions(
+    *,
+    transcript: str,
+    event: dict[str, Any],
+    intent: dict[str, Any],
+    lex_slots: dict[str, Any],
+    attrs: dict[str, str],
+    call_id: str,
+    booking_id: str,
+    company_id: str,
+) -> dict[str, Any]:
+    """Close the call after the caller declined to ask anything.
+
+    Don't run slot cleaning — Lex auto-captured the "no thanks" reply against
+    the transport slot (email), but the real email was already saved earlier.
+    Just log the caller turn, speak the price summary, end the call.
+    """
+    elicited = _just_elicited_slot(lex_slots, transcript)
+    if elicited:
+        # Restore the slot to its previously-captured value (the email we
+        # already saved). Easiest: just drop the new capture from Lex's view.
+        lex_slots.pop(elicited, None)
+
+    if transcript:
+        _log_caller_turn(call_id, company_id, transcript)
+
+    state = _state_from_lex_slots(lex_slots)
+    close_message = _compose_close_message(booking_id, state)
+    _log_agent_turn(call_id, company_id, close_message)
+    if USE_REAL_DDB:
+        try:
+            ddb.end_call(call_id, booking_id, reason="completed")
+        except Exception as exc:  # pragma: no cover
+            logger.warning("end_call failed: %s", exc)
+
+    attrs["callId"] = call_id
+    attrs["bookingId"] = booking_id
+    attrs["companyId"] = company_id
+    return lex_v2.close_session(
+        close_message,
         session_attributes=attrs,
         intent_name=intent.get("name", lex_v2.INTENT_NAME),
     )
@@ -496,26 +617,36 @@ def _clean_lex_slots(lex_slots: dict[str, Any]) -> tuple[dict[str, Any], list[tu
 
 
 def _bare_number_fallback(slot: str, raw: str) -> Any | None:
-    """For numeric slots, accept a standalone number when Lex elicited them."""
-    if slot not in {"area", "rooms"}:
-        return None
-    text = raw.strip().rstrip(".").lower()
-    # Digit literal first.
-    import re as _re
-    m = _re.match(r"^\s*(\d+(?:\.\d+)?)\s*$", text)
-    if m:
-        n = float(m.group(1))
+    """Per-slot fallback when the regex extractor finds nothing canonical.
+
+    - area / rooms: accept a digit or word-number (Lex was eliciting → caller's
+      bare reply belongs to that slot).
+    - when: accept any short text — calendar phrases like "in three days",
+      "next monday morning" don't match our regex but are still meaningful for
+      the wall and the operator. Cap at 60 chars to avoid swallowing FAQs the
+      question detector missed.
+    """
+    if slot in {"area", "rooms"}:
+        text = raw.strip().rstrip(".").lower()
+        import re as _re
+        m = _re.match(r"^\s*(\d+(?:\.\d+)?)\s*$", text)
+        if m:
+            n = float(m.group(1))
+            if slot == "area":
+                return f"{n:g} m2"
+            return int(n) if n.is_integer() else n
+        from slot_extraction import _parse_word_number  # local import to avoid cycle
+        n = _parse_word_number(text)
+        if n is None:
+            return None
         if slot == "area":
-            return f"{n:g} m2"
-        return int(n) if n.is_integer() else n
-    # Word number.
-    from slot_extraction import _parse_word_number  # local import to avoid cycle
-    n = _parse_word_number(text)
-    if n is None:
-        return None
-    if slot == "area":
-        return f"{n} m2"
-    return n
+            return f"{n} m2"
+        return n
+    if slot == "when":
+        cleaned = raw.strip().rstrip(".").strip()
+        if 0 < len(cleaned) <= 60:
+            return cleaned
+    return None
 
 
 def _state_from_lex_slots(lex_slots: dict[str, Any]) -> SlotState:
