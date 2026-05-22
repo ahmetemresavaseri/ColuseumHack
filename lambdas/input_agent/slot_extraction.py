@@ -78,13 +78,62 @@ ROOMS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Lex transcribes spoken numbers as words ("four rooms"); cover one to ten.
+# Lex transcribes spoken numbers as words ("four rooms"); cover one to ninety-nine.
 WORD_NUMBERS: dict[str, int] = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+    "hundred": 100,
 }
+_WORD_NUM_PATTERN = "|".join(sorted(WORD_NUMBERS, key=len, reverse=True))
 WORD_ROOMS_RE = re.compile(
-    r"\b(" + "|".join(WORD_NUMBERS) + r")\s+(?:rooms?|bedrooms?)\b",
+    rf"\b({_WORD_NUM_PATTERN})\s+(?:rooms?|bedrooms?)\b",
+    re.IGNORECASE,
+)
+# Match phrases like "fifty square meters" or "forty sqft".
+WORD_AREA_RE = re.compile(
+    rf"\b((?:{_WORD_NUM_PATTERN})(?:[\s-]+(?:{_WORD_NUM_PATTERN}))*)\s*"
+    r"(m2|m²|sqm|square\s*meters?|sq\s*ft|sqft|square\s*feet)",
+    re.IGNORECASE,
+)
+# Standalone word-number (used when Lex prompt was "rooms" and the caller
+# just said "three").
+WORD_NUMBER_ONLY_RE = re.compile(
+    rf"^\s*((?:{_WORD_NUM_PATTERN})(?:[\s-]+(?:{_WORD_NUM_PATTERN}))*)\s*\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_word_number(text: str) -> int | None:
+    """Convert 'forty', 'twenty five', 'one hundred' → int. Best-effort."""
+    total = 0
+    chunk = 0
+    found_any = False
+    for tok in re.split(r"[\s-]+", text.strip().lower()):
+        if tok in WORD_NUMBERS:
+            n = WORD_NUMBERS[tok]
+            found_any = True
+            if n == 100:
+                chunk = max(chunk, 1) * 100
+            else:
+                chunk += n
+        elif tok in {"and", ""}:
+            continue
+        else:
+            return None
+    total += chunk
+    return total if found_any else None
+
+
+# Voice-spelled emails: "a. b. c. at gmail dot com" → "abc@gmail.com".
+# Captures repeated 1-2 char tokens (a, b, c) before "at", then "<word> dot
+# <word>" after. Best-effort; not robust against arbitrary spelling.
+VOICE_EMAIL_RE = re.compile(
+    r"\b([A-Za-z](?:\.\s*[A-Za-z])+)\s*\.?\s*(?:at|@)\s*([A-Za-z0-9]+)"
+    r"\s*(?:dot|\.)\s*([A-Za-z]{2,})\b",
     re.IGNORECASE,
 )
 
@@ -120,6 +169,12 @@ def extract_slots_deterministic(text: str, state: SlotState | None = None) -> li
                 found.append(("area", _format_area(area_value, unit)))
             except ValueError:
                 pass
+        else:
+            word_match = WORD_AREA_RE.search(text)
+            if word_match:
+                num = _parse_word_number(word_match.group(1))
+                if num is not None:
+                    found.append(("area", _format_area(float(num), word_match.group(2).lower())))
 
     if state.rooms is None:
         match = ROOMS_RE.search(text)
@@ -133,7 +188,9 @@ def extract_slots_deterministic(text: str, state: SlotState | None = None) -> li
         else:
             word_match = WORD_ROOMS_RE.search(text)
             if word_match:
-                found.append(("rooms", WORD_NUMBERS[word_match.group(1).lower()]))
+                num = _parse_word_number(word_match.group(1))
+                if num is not None:
+                    found.append(("rooms", num))
 
     if not state.urgency:
         for needle, label in URGENCY_KEYWORDS:
@@ -145,6 +202,23 @@ def extract_slots_deterministic(text: str, state: SlotState | None = None) -> li
         match = EMAIL_RE.search(text)
         if match:
             found.append(("email", match.group(0)))
+        else:
+            voice = VOICE_EMAIL_RE.search(text)
+            if voice:
+                local = re.sub(r"[\s.]", "", voice.group(1)).lower()
+                domain = voice.group(2).lower()
+                tld = voice.group(3).lower()
+                found.append(("email", f"{local}@{domain}.{tld}"))
+
+    # Lex prompts each slot one at a time; if the caller's whole utterance is
+    # just a word-number (e.g. "three" answering "How many rooms?"), accept it
+    # as the next missing slot.
+    if state.rooms is None and not any(s == "rooms" for s, _ in found):
+        bare = WORD_NUMBER_ONLY_RE.match(text)
+        if bare:
+            num = _parse_word_number(bare.group(1))
+            if num is not None:
+                found.append(("rooms", num))
 
     return found
 

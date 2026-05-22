@@ -135,9 +135,14 @@ def handle_lex_event(event: dict[str, Any], context: Any | None = None) -> dict[
     # the slot value (because we use AMAZON.FreeFormInput). Run each captured
     # value back through our deterministic extractor so e.g.
     #   when="Tomorrow for 85 square meters" → when="tomorrow"
-    # The Wall (and downstream Brain) wants the canonical value, not the
-    # raw transcript.
-    lex_slots = _clean_lex_slots(lex_slots)
+    # Persist each cleaned value through the adapter so the Wall sees it —
+    # otherwise the cleaned values only live in Lex's session and never reach
+    # the SlotSaved stream.
+    lex_slots, cleaned_pairs = _clean_lex_slots(lex_slots)
+    for slot, value in cleaned_pairs:
+        save_slot_adapter(
+            call_id=call_id, booking_id=booking_id, slot=slot, value=value,
+        )
     state = _state_from_lex_slots(lex_slots)
 
     transcript = lex_v2.get_input_transcript(event)
@@ -224,14 +229,18 @@ def _promote_to_collect_booking(event: dict[str, Any]) -> dict[str, Any] | None:
     return {"name": "CollectBooking", "slots": {}, "state": "InProgress"}
 
 
-def _clean_lex_slots(lex_slots: dict[str, Any]) -> dict[str, Any]:
+def _clean_lex_slots(lex_slots: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
     """Run each Lex auto-captured slot value through the deterministic extractor.
 
     Lex stores `originalValue=<full caller utterance>` when using
     AMAZON.FreeFormInput. If the extractor finds a clean canonical value for
-    the *same* slot inside that text, we replace the Lex value with ours.
+    the *same* slot inside that text, replace the Lex value with ours.
+
+    Returns the cleaned dict AND a list of `(slot, canonical_value)` pairs
+    that actually got cleaned, so the handler can persist them.
     """
     cleaned: dict[str, Any] = {}
+    changed: list[tuple[str, Any]] = []
     for slot, payload in lex_slots.items():
         if not isinstance(payload, dict):
             cleaned[slot] = payload
@@ -244,9 +253,10 @@ def _clean_lex_slots(lex_slots: dict[str, Any]) -> dict[str, Any]:
         canonical = next((v for s, v in pairs if s == slot), None)
         if canonical is not None and str(canonical) != raw:
             cleaned[slot] = _to_lex_slot_value(canonical)
+            changed.append((slot, canonical))
         else:
             cleaned[slot] = payload
-    return cleaned
+    return cleaned, changed
 
 
 def _state_from_lex_slots(lex_slots: dict[str, Any]) -> SlotState:

@@ -45,6 +45,42 @@ def test_sqft_recognized():
     assert "sqft" in str(accepted["area"]).lower()
 
 
+def test_word_number_area():
+    state = SlotState()
+    pairs = extract_slots_deterministic("fifty square meters", state)
+    apply_extractions(state, pairs)
+    assert "50" in str(state.area)
+
+
+def test_word_number_rooms_with_keyword():
+    state = SlotState()
+    pairs = extract_slots_deterministic("twenty rooms", state)
+    apply_extractions(state, pairs)
+    assert state.rooms == 20
+
+
+def test_bare_word_number_rooms():
+    """Lex prompts each slot one at a time; a bare 'three' should fill rooms."""
+    state = SlotState(when="tomorrow", what="OFFICE_CLEANING", area=85, urgency="high")
+    pairs = extract_slots_deterministic("three.", state)
+    apply_extractions(state, pairs)
+    assert state.rooms == 3
+
+
+def test_voice_spelled_email():
+    state = SlotState()
+    pairs = extract_slots_deterministic("a. b. c. at gmail dot com", state)
+    apply_extractions(state, pairs)
+    assert state.email == "abc@gmail.com"
+
+
+def test_voice_email_at_symbol_variant():
+    state = SlotState()
+    pairs = extract_slots_deterministic("t. e. s. t. @ gmail dot com", state)
+    apply_extractions(state, pairs)
+    assert state.email == "test@gmail.com"
+
+
 def test_required_slots_progress():
     state = SlotState()
     pairs = extract_slots_deterministic(
