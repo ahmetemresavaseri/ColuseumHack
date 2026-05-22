@@ -11,7 +11,7 @@ class NovaSonicClient:
     """Thin wrapper so the Input Agent handler is not coupled to boto3 details."""
 
     def __init__(self, model_id: str | None = None) -> None:
-        self.model_id = model_id or os.environ.get("NOVA_SONIC_MODEL_ID", "amazon.nova-sonic-v1:0")
+        self.model_id = model_id or os.environ.get("NOVA_SONIC_MODEL_ID", "amazon.nova-2-sonic-v1:0")
         self.client = boto3.client("bedrock-runtime")
 
     def stream_audio(self, audio_events: Iterable[bytes], system_prompt: str) -> Iterator[bytes]:
