@@ -4,12 +4,18 @@ export function CitationsPane({ citations }: { citations: Citation[] }) {
   return (
     <section className="panel citationsPanel">
       <p className="eyebrow">Citations</p>
-      {citations.map((citation) => (
-        <article key={citation.source}>
-          <strong>{citation.source}</strong>
-          <p>{citation.excerpt}</p>
-        </article>
-      ))}
+      {citations.length === 0 ? (
+        <p className="placeholder">
+          KB citations appear here when the agent answers an FAQ.
+        </p>
+      ) : (
+        citations.map((citation, idx) => (
+          <article key={`${citation.source}-${idx}`}>
+            <strong>{citation.source}</strong>
+            <p>{citation.excerpt}</p>
+          </article>
+        ))
+      )}
     </section>
   );
 }

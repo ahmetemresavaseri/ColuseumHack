@@ -179,6 +179,32 @@ python smoke_test.py
 ```
 Expected: `[OK]` for STS, Bedrock models, Claude Sonnet 4.6 (responds `'PONG'`), Polly (neural MP3 stream), and Transcribe Streaming (API surface + service reachable).
 
+### Run the Live Call Wall locally (no AWS required)
+
+The Wall ships with a mock mode so frontend work can proceed without any
+deployed resources:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+If `VITE_AUDIO_WS_URL`, `VITE_WALL_WS_URL`, or `VITE_WALL_API_URL` are unset,
+the Wall renders empty panes. Hit **Simulate** to play a scripted Phase 1
+call (transcript + slots + citation + brain estimate); hit **Clear** to
+reset.
+
+To exercise the Python spine end-to-end without AWS:
+
+```bash
+python scripts/simulate_call_events.py --pretty
+```
+
+That emits the same `WallEvent` JSON the Lambda fan-out would post; the
+Python event-builder is at `lambdas/input_agent/events.py` and mirrors
+`web/src/lib/types.ts`.
+
 ### Deploy the stack
 ```bash
 make deploy

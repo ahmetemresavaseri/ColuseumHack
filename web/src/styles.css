@@ -103,6 +103,35 @@ dd {
   gap: 8px;
 }
 
+.controls button.primary {
+  background: #1b5e4f;
+  color: #ffffff;
+  border-color: #1b5e4f;
+}
+
+.controls button[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.placeholder {
+  color: #60716c;
+  font-style: italic;
+  font-size: 0.9rem;
+}
+
+.errorText {
+  color: #b1463d;
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+code {
+  background: #ebf1ee;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
 @media (max-width: 760px) {
   .wall {
     padding: 18px;

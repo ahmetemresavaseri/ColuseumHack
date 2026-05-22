@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'lambdas/input_agent'\\); import handler; print\\('handler OK'\\); import events; print\\('events OK'\\); import tool_dispatcher; print\\('tool_dispatcher OK'\\)\")"
+    ]
+  }
+}
